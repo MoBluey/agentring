@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import signal
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated, Any, Optional
 
 import segno
@@ -31,6 +33,10 @@ devices_app = typer.Typer(help="List or revoke paired phones.", no_args_is_help=
 app.add_typer(devices_app, name="devices")
 agents_app = typer.Typer(help="Your agents the voice AI can consult (agents.yaml).", no_args_is_help=False)
 app.add_typer(agents_app, name="agents")
+chats_app = typer.Typer(help="Agent session chats.", no_args_is_help=True)
+app.add_typer(chats_app, name="chats")
+
+ChatOpt = Annotated[Optional[str], typer.Option("--chat", help="Chat ID (default AGENTRING_CHAT_ID or legacy chat).", envvar="AGENTRING_CHAT_ID")]
 
 JsonOpt = Annotated[bool, typer.Option("--json", help="Machine-readable JSON output.")]
 AiOpt = Annotated[bool, typer.Option("--ai", help="A voice AI talks on the call (default Gemini Live; see --provider).")]
@@ -125,8 +131,8 @@ def _settings() -> Settings:
         raise _fail(str(e)) from None
 
 
-def _client(s: Settings) -> RelayClient:
-    return RelayClient(s.relay_url, s.api_key)
+def _client(s: Settings, chat_id: str | None = None) -> RelayClient:
+    return RelayClient(s.relay_url, s.api_key, chat_id=chat_id)
 
 
 def _emit_json(obj: Any) -> None:
@@ -157,6 +163,73 @@ def parse_since(value: str, now_ms: int | None = None) -> int:
     if dt.tzinfo is None:
         dt = dt.astimezone()  # local time
     return int(dt.timestamp() * 1000)
+
+
+@chats_app.command("create")
+def chats_create(
+    session_id: Annotated[Optional[str], typer.Option("--session", help="Stable agent session ID.")] = None,
+    provider: Annotated[Optional[str], typer.Option("--provider", help="Caller provider, separate from voice.")] = None,
+    model: Annotated[Optional[str], typer.Option("--model", help="Verified caller coding/chat model.")] = None,
+    project: Annotated[Optional[str], typer.Option("--project")] = None,
+    title: Annotated[Optional[str], typer.Option("--title")] = None,
+    description: Annotated[Optional[str], typer.Option("--description")] = None,
+    json_out: JsonOpt = False,
+) -> None:
+    """Create or update one session's chat. Reusing --session resumes it."""
+    session_id = (session_id or os.environ.get("AGENTRING_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
+                  or os.environ.get("CODEX_SESSION_ID"))
+    if not session_id:
+        raise _fail("Provide --session or AGENTRING_SESSION_ID")
+    with _client(_settings()) as client:
+        try:
+            chat = client.open_chat(session_id, provider=provider, model=model, project=project, title=title, description=description)
+        except RelayError as e:
+            raise _fail(str(e)) from None
+    _emit_json(chat) if json_out else typer.echo(chat["chat_id"])
+
+@chats_app.command("list")
+def chats_list(json_out: JsonOpt = False) -> None:
+    """List the agent session chats."""
+    with _client(_settings()) as client:
+        try:
+            chats = client.list_chats()
+        except RelayError as e:
+            raise _fail(str(e)) from None
+    if json_out:
+        _emit_json({"chats": chats})
+    else:
+        for chat in chats:
+            typer.echo(f"{chat['chat_id']}  {chat['title']}")
+
+
+@app.command("send-file")
+def send_file(
+    path: Annotated[Path, typer.Argument(help="File or media to send.")],
+    text: Annotated[str, typer.Option("--text", help="Optional caption.")] = "",
+    chat: ChatOpt = None,
+    json_out: JsonOpt = False,
+) -> None:
+    """Upload a file and send it in the selected chat."""
+    with _client(_settings(), chat) as client:
+        try:
+            message = client.send_file(path, text)
+        except (RelayError, OSError, ValueError) as e:
+            raise _fail(str(e)) from None
+    _emit_json(message) if json_out else typer.echo(message["msg_id"])
+
+@app.command("download-file")
+def download_file(
+    attachment_id: Annotated[str, typer.Argument()],
+    destination: Annotated[Optional[Path], typer.Option("--destination", "-o", help="New file or existing directory; never overwrite.")] = None,
+    json_out: JsonOpt = False,
+) -> None:
+    """Download an attachment, checking its size and checksum."""
+    with _client(_settings()) as client:
+        try:
+            result = client.download_file(attachment_id, destination)
+        except (RelayError, OSError, ValueError) as e:
+            raise _fail(str(e)) from None
+    _emit_json(result) if json_out else typer.echo(result["path"])
 
 
 @app.callback()
@@ -265,12 +338,13 @@ def call(
     agents_file: AgentsFileOpt = None,
     fallback: Annotated[bool, typer.Option("--fallback/--no-fallback",
                                            help="--ai: if nobody answers, send the reason as a message.")] = True,
+    chat: ChatOpt = None,
     json_out: JsonOpt = False,
 ) -> None:
     """Call the phone. Rings until answered (30 s). With --ai a voice AI talks to you; otherwise the agent greets and echoes you (audio test)."""
     if ai:
         return _ai_call(reason, urgent, agent_name, instructions, mcp, tools, model, voice, agents_file, fallback,
-                        json_out, provider)
+                        json_out, provider, chat)
     try:
         from .voice.echo import EchoWorker, synthesize
     except ImportError:
@@ -278,7 +352,7 @@ def call(
 
     s = _settings()
     log = logging.getLogger("agentring")
-    client = _client(s)
+    client = _client(s, chat)
 
     async def run() -> dict:
         after = (await asyncio.to_thread(client.list_events, 0, 1))["last_seq"]
@@ -387,20 +461,22 @@ def call(
 def msg(
     text: Annotated[str, typer.Argument(help="Message text (max 4000 chars).")],
     reply_to: Annotated[Optional[str], typer.Option("--reply-to", help="msg_id or call_id this answers.")] = None,
+    chat: ChatOpt = None,
     json_out: JsonOpt = False,
 ) -> None:
     """Send a message to the phone. Prints the msg_id."""
     s = _settings()
-    with _client(s) as c:
+    with _client(s, chat) as c:
         try:
             m = c.post_message(text, reply_to=reply_to)
         except RelayError as e:
             raise _fail(str(e)) from None
     store = Store(s.db_path)
-    store.upsert_message(m["msg_id"], "agent", m["text"], m["created_at"], m.get("reply_to"))
+    store.upsert_message(m["msg_id"], "agent", m["text"], m["created_at"], m.get("reply_to"),
+                         m.get("chat_id", "chat_default"), m.get("attachments", []))
     store.close()
     if json_out:
-        _emit_json({"msg_id": m["msg_id"]})
+        _emit_json({"msg_id": m["msg_id"], "chat_id": m.get("chat_id", "chat_default")})
     else:
         typer.echo(m["msg_id"])
 
@@ -413,6 +489,7 @@ def replies(
     all_: Annotated[bool, typer.Option("--all", help="Show all replies, not just new ones.")] = False,
     peek: Annotated[bool, typer.Option("--peek", help="Don't mark the replies as seen.")] = False,
     limit: Annotated[int, typer.Option("--limit", min=1, max=500)] = 100,
+    chat: ChatOpt = None,
     json_out: JsonOpt = False,
 ) -> None:
     """Show the user's replies. By default only new ones (not shown before), which are then marked as seen."""
@@ -426,7 +503,7 @@ def replies(
 
         since_ms = parse_since(since) if since else None
         undelivered_only = since is None and not all_
-        rows = store.replies(since=since_ms, undelivered_only=undelivered_only, limit=limit)
+        rows = store.replies(since=since_ms, undelivered_only=undelivered_only, limit=limit, chat_id=chat or "chat_default")
         if rows and not peek:
             store.mark_delivered([r["msg_id"] for r in rows], _now_ms())
             for r in rows:
@@ -438,7 +515,8 @@ def replies(
     store.close()
 
     out = [
-        {"msg_id": r["msg_id"], "text": r["text"], "created_at": r["created_at"], "reply_to": r["reply_to"]}
+        {"msg_id": r["msg_id"], "text": r["text"], "created_at": r["created_at"], "reply_to": r["reply_to"],
+         "chat_id": r["chat_id"], "attachments": r["attachments"]}
         for r in rows
     ]
     if json_out:
@@ -449,6 +527,8 @@ def replies(
         return
     for r in out:
         typer.echo(f"[{_fmt_ts(r['created_at'])}] {r['text']}")
+        for attachment in r["attachments"]:
+            typer.echo(f"  {attachment['name']} ({attachment['size_bytes']} bytes) {attachment['attachment_id']}")
 
 
 @app.command()
@@ -505,11 +585,11 @@ def devices_list(
 
 def _ai_call(reason: str, urgent: bool, agent_name: str | None, instructions: str | None, mcp: list[str] | None,
              tools: str | None, model: str | None, voice: str | None, agents_file: str | None, fallback: bool,
-             json_out: bool, provider: str | None = None) -> None:
+             json_out: bool, provider: str | None = None, chat: str | None = None) -> None:
     from .voice import CallInfo
 
     s = _settings()
-    client = _client(s)
+    client = _client(s, chat)
 
     async def run() -> Any:
         built = await _build_ai(instructions, mcp, tools, model, voice, agents_file, provider)
@@ -696,7 +776,8 @@ def serve(
             return
         info, join = accepted
         log.info("answering %s", info.call_id)
-        r = await voice_agent.run(info, join, relay=client, stop=stop)
+        call_client = client.with_chat(e.get("chat_id", "chat_default"))
+        r = await voice_agent.run(info, join, relay=call_client, stop=stop)
         log.info("call %s: %s, %d s, %d turns", info.call_id, r.end_reason, r.duration_s, len(r.transcript))
 
     def on_event(e: dict[str, Any], stop: asyncio.Event | None = None) -> None:

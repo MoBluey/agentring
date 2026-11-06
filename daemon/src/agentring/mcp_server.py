@@ -16,6 +16,7 @@ import asyncio
 import copy
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -79,6 +80,22 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 
+TOOLS.append({"name": "open_chat", "description": "Create or resume this agent session's chat and bind this MCP connection. Supply verified caller model, provider and project; unknown fields may be omitted.",
+              "inputSchema": {"type": "object", "properties": {k: {"type": "string"} for k in
+                              ("session_id", "provider", "model", "project", "title", "description")}, "required": ["session_id"]}})
+for tool in TOOLS:
+    if tool["name"] in ("send_message", "get_replies", "call"):
+        tool["inputSchema"]["properties"]["chat_id"] = {"type": "string", "description": "Override the chat bound by open_chat."}
+    if tool["name"] == "send_message":
+        tool["inputSchema"]["properties"]["attachment_ids"] = {"type": "array", "items": {"type": "string"}, "maxItems": 8}
+FILE_TOOLS = [
+    {"name": "send_file", "description": "Upload a local file or media and send it to the phone. Stdio only.",
+     "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}, "text": {"type": "string"}, "chat_id": {"type": "string"}}, "required": ["path"]}},
+    {"name": "download_file", "description": "Download a received attachment to a local file, checking its checksum. Never overwrites. Stdio only.",
+     "inputSchema": {"type": "object", "properties": {"attachment_id": {"type": "string"}, "destination": {"type": "string"}}, "required": ["attachment_id"]}},
+]
+
+
 class ToolError(Exception):
     """Reported to the agent as a tool error (isError), not a protocol error."""
 
@@ -129,7 +146,10 @@ class AgentringTools:
 
     def __init__(self, client: RelayClient, store: Store, *, relay_url: str | None = None, poll_s: float = 2.0,
                  agent_name: str | None = None, device_ids: list[str] | None = None,
-                 agents_file: Path | None = None, call_slots: CallSlots | None = None):
+                 agents_file: Path | None = None, call_slots: CallSlots | None = None,
+                 local_files: bool = False, chat_binding: dict[str, str] | None = None):
+        self.local_files = local_files
+        self.chat_binding = chat_binding if chat_binding is not None else {}
         self.client = client
         self.store = store
         self.relay_url = relay_url or client.relay_url
@@ -146,6 +166,8 @@ class AgentringTools:
     def from_settings(cls, settings: Settings, **kw: Any) -> AgentringTools:
         """The local daemon's relay, store and agents.yaml (what `agentring mcp` uses)."""
         kw.setdefault("agents_file", home_dir() / "agents.yaml")
+        kw.setdefault("local_files", True)
+        kw.setdefault("chat_binding", {"chat_id": os.environ.get("AGENTRING_CHAT_ID", "chat_default")})
         return cls(RelayClient(settings.relay_url, settings.api_key), Store(settings.db_path),
                    relay_url=settings.relay_url, **kw)
 
@@ -153,14 +175,45 @@ class AgentringTools:
         self.client.close()
         self.store.close()
 
-    async def send_message(self, text: str, reply_to: str | None = None) -> dict[str, Any]:
-        m = await asyncio.to_thread(self.client.post_message, text, reply_to=reply_to)
+    @property
+    def chat_id(self) -> str:
+        return self.chat_binding.get("chat_id", "chat_default")
+
+    def with_binding(self, binding: dict[str, str]) -> AgentringTools:
+        view = copy.copy(self)
+        view.chat_binding = binding
+        return view
+
+    async def open_chat(self, session_id: str, provider: str | None = None, model: str | None = None,
+                        project: str | None = None, title: str | None = None, description: str | None = None) -> dict[str, Any]:
+        chat = await asyncio.to_thread(self.client.open_chat, session_id, provider=provider, model=model,
+                                       project=project, title=title, description=description)
+        self.chat_binding["chat_id"] = chat["chat_id"]
+        return chat
+
+    async def send_file(self, path: str, text: str = "", chat_id: str | None = None) -> dict[str, Any]:
+        if not self.local_files:
+            raise ToolError("Local file tools are available over stdio only")
+        m = await asyncio.to_thread(self.client.send_file, path, text, chat_id=chat_id or self.chat_id)
+        await asyncio.to_thread(self._record_sent, m)
+        return m
+
+    async def download_file(self, attachment_id: str, destination: str | None = None) -> dict[str, Any]:
+        if not self.local_files:
+            raise ToolError("Local file tools are available over stdio only")
+        return await asyncio.to_thread(self.client.download_file, attachment_id, destination)
+
+    async def send_message(self, text: str, reply_to: str | None = None, chat_id: str | None = None,
+                           attachment_ids: list[str] | None = None) -> dict[str, Any]:
+        m = await asyncio.to_thread(self.client.post_message, text, reply_to=reply_to,
+                                   chat_id=chat_id or self.chat_id, attachment_ids=attachment_ids)
         await asyncio.to_thread(self._record_sent, m)  # not on the event loop: get_replies may hold the lock
-        return {"msg_id": m["msg_id"]}
+        return {"msg_id": m["msg_id"], "chat_id": m.get("chat_id", self.chat_id), "attachments": m.get("attachments", [])}
 
     def _record_sent(self, m: dict[str, Any]) -> None:
         with self._db:
-            self.store.upsert_message(m["msg_id"], "agent", m["text"], m["created_at"], m.get("reply_to"))
+            self.store.upsert_message(m["msg_id"], "agent", m["text"], m["created_at"], m.get("reply_to"),
+                                      m.get("chat_id", "chat_default"), m.get("attachments", []))
 
     @property
     def busy(self) -> bool:
@@ -175,13 +228,13 @@ class AgentringTools:
         view.relay_url = relay_url or client.relay_url
         return view
 
-    def _new_replies(self, cancelled: threading.Event | None = None) -> list[dict[str, Any]]:
+    def _new_replies(self, cancelled: threading.Event | None = None, chat_id: str | None = None) -> list[dict[str, Any]]:
         with self._busy, self._db:
-            return self._take_replies(cancelled)
+            return self._take_replies(cancelled, chat_id)
 
-    def _take_replies(self, cancelled: threading.Event | None = None) -> list[dict[str, Any]]:
+    def _take_replies(self, cancelled: threading.Event | None = None, chat_id: str | None = None) -> list[dict[str, Any]]:
         catch_up(self.client, self.store)
-        rows = self.store.replies(since=None, undelivered_only=True, limit=100)
+        rows = self.store.replies(since=None, undelivered_only=True, limit=100, chat_id=chat_id or self.chat_id)
         if cancelled is not None and cancelled.is_set():
             return []  # nobody will get them: leave them for the next get_replies
         if rows:
@@ -192,15 +245,16 @@ class AgentringTools:
                         self.client.mark_read(r["msg_id"])
                     except RelayError:
                         pass  # the read receipt is cosmetic
-        return [{"msg_id": r["msg_id"], "text": r["text"], "reply_to": r["reply_to"],
+        return [{"msg_id": r["msg_id"], "text": r["text"], "reply_to": r["reply_to"], "chat_id": r["chat_id"], "attachments": r["attachments"],
                  "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["created_at"] / 1000))} for r in rows]
 
-    async def get_replies(self, wait_s: int = 0) -> dict[str, Any]:
+    async def get_replies(self, wait_s: int = 0, chat_id: str | None = None) -> dict[str, Any]:
+        active_chat = chat_id or self.chat_id
         deadline = time.monotonic() + max(0, min(int(wait_s), 3600))
         while True:
             cancelled = threading.Event()
             try:
-                replies = await asyncio.to_thread(self._new_replies, cancelled)
+                replies = await asyncio.to_thread(self._new_replies, cancelled, active_chat)
             except asyncio.CancelledError:
                 cancelled.set()  # the thread goes on, but won't mark anything as returned
                 raise
@@ -208,7 +262,8 @@ class AgentringTools:
                 return {"replies": replies}
             await asyncio.sleep(self.poll_s)
 
-    async def call(self, reason: str, context: str | None = None, urgent: bool = False) -> dict[str, Any]:
+    async def call(self, reason: str, context: str | None = None, urgent: bool = False, chat_id: str | None = None) -> dict[str, Any]:
+        relay = self.client.with_chat(chat_id or self.chat_id)
         try:
             from .voice import CallInfo
             from .voice.agents import AgentsConfigError, load_agents
@@ -239,11 +294,11 @@ class AgentringTools:
             async with self._call_lock:
                 built = await build_agent(choice, instructions=instructions, agents=agents)
                 try:
-                    created = await asyncio.to_thread(self.client.create_call, reason,
+                    created = await asyncio.to_thread(relay.create_call, reason,
                                                       priority="urgent" if urgent else "normal",
                                                       agent_name=self.agent_name, device_ids=self.device_ids)
                     r = await built.agent.run(CallInfo(created["call"]["call_id"], reason), created["join"],
-                                              relay=self.client)
+                                              relay=relay)
                 finally:
                     await built.aclose()  # agents' late answers are stopped; the user got the gist on the call
         finally:
@@ -251,10 +306,11 @@ class AgentringTools:
                 self.call_slots.release()
         if not r.answered:
             try:  # nobody answered: leave the reason (and context) where the user can reply
-                r.fallback_msg_id = await asyncio.to_thread(missed_call_message, self.client, r.call_id, reason, context)
+                r.fallback_msg_id = await asyncio.to_thread(missed_call_message, relay, r.call_id, reason, context)
             except RelayError as e:
                 log.warning("could not send the missed-call message: %s", e)
         out = asdict(r)
+        out["chat_id"] = relay.chat_id
         out["transcript"] = [{"who": "user" if role == "user" else "voice_ai", "text": t} for role, t in r.transcript]
         return out
 
@@ -268,7 +324,7 @@ class AgentringTools:
 
 # ------------------------------------------------------------------ JSON-RPC (both transports)
 
-TOOL_NAMES = frozenset(t["name"] for t in TOOLS)
+TOOL_NAMES = frozenset(t["name"] for t in TOOLS + FILE_TOOLS)
 
 
 def valid_id(rid: Any) -> bool:
@@ -349,10 +405,10 @@ async def handle_rpc(tools: AgentringTools, m: Any) -> dict[str, Any] | None:
     if method == "ping":
         return rpc_response(rid, {})
     if method == "tools/list":
-        return rpc_response(rid, {"tools": TOOLS})
+        return rpc_response(rid, {"tools": TOOLS + FILE_TOOLS if tools.local_files else TOOLS})
     if method == "tools/call":
         name = params.get("name")
-        if name not in TOOL_NAMES:
+        if name not in TOOL_NAMES or (name in {"send_file", "download_file"} and not tools.local_files):
             return rpc_response(rid, error=(-32602, f"unknown tool: {name}"))
         return rpc_response(rid, await call_tool(tools, name, params.get("arguments") or {}))
     return rpc_response(rid, error=(-32601, f"method not found: {method}"))

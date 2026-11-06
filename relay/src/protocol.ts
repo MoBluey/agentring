@@ -3,6 +3,8 @@ import type { components } from "./generated/api.js";
 export type Schemas = components["schemas"];
 export type Event = Schemas["Event"];
 export type EventType = Event["type"];
+export type Chat = Schemas["Chat"];
+export type Attachment = Schemas["Attachment"];
 export type Message = Schemas["Message"];
 export type Device = Schemas["Device"];
 export type Party = Schemas["Party"];

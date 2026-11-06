@@ -148,6 +148,8 @@ class M1EndToEndTest {
 
         // 3. Agent message arrives live in the thread (WebSocket path).
         compose.onNodeWithTag("tab_messages").performClick()
+        waitForTag("chat_chat_default")
+        compose.onNodeWithTag("chat_chat_default").performClick()
         val agentMsg = agent("POST", "/v1/messages", """{"text":"hola desde CI 👋"}""")
         val agentMsgId = agentMsg["msg_id"]!!.jsonPrimitive.content
         waitForText("hola desde CI")

@@ -78,6 +78,36 @@ const MIGRATIONS: string[] = [
   -- Targeted calls: JSON array of the device ids the call rings; NULL = every paired phone.
   ALTER TABLE calls ADD COLUMN device_ids TEXT;
   `,
+  `
+  CREATE TABLE attachments (
+    attachment_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    owner TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    msg_id TEXT REFERENCES messages(msg_id)
+  );
+  CREATE INDEX attachments_message ON attachments(msg_id);
+  CREATE TABLE chats (
+    chat_id TEXT PRIMARY KEY,
+    client_session_id TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    caller TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  INSERT INTO chats VALUES ('chat_default', 'legacy', 'Unknown model · Unknown project', 'Legacy chat; caller metadata unknown', '{}', 0, 0);
+  ALTER TABLE messages ADD COLUMN chat_id TEXT NOT NULL DEFAULT 'chat_default';
+  ALTER TABLE calls ADD COLUMN chat_id TEXT NOT NULL DEFAULT 'chat_default';
+  ALTER TABLE calls ADD COLUMN chat TEXT;
+  CREATE INDEX messages_chat ON messages(chat_id, msg_id);
+  DROP INDEX messages_client_id;
+  CREATE UNIQUE INDEX messages_client_id ON messages(sender, chat_id, COALESCE(device_id, ''), client_msg_id) WHERE client_msg_id IS NOT NULL;
+  `,
 ];
 
 export type Db = DatabaseSync;

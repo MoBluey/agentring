@@ -32,7 +32,7 @@ export function ulid(now = Date.now()): string {
   return encode(BigInt(now), 10) + encode(lastRandom, 16);
 }
 
-export type IdPrefix = "rly" | "dev" | "call" | "msg" | "evt" | "tnt";
+export type IdPrefix = "rly" | "dev" | "call" | "msg" | "evt" | "tnt" | "att" | "chat";
 
 export function newId(prefix: IdPrefix): string {
   return `${prefix}_${ulid()}`;

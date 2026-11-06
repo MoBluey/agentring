@@ -60,14 +60,14 @@ def test_mcp_server_messages(relay: str, agentring_home):
         c.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         assert c.request("ping")["result"] == {}
         names = [t["name"] for t in c.request("tools/list")["result"]["tools"]]
-        assert names == ["send_message", "get_replies", "call", "status"]
+        assert names == ["send_message", "get_replies", "call", "status", "open_chat", "send_file", "download_file"]
 
         st = c.tool("status")
         assert not st["isError"] and st["structuredContent"]["phones"][0]["name"] == "Test Phone"
 
         sent = c.tool("send_message", text="¿Despliego?")
         msg_id = sent["structuredContent"]["msg_id"]
-        assert json.loads(sent["content"][0]["text"]) == {"msg_id": msg_id}
+        assert json.loads(sent["content"][0]["text"]) == {"msg_id": msg_id, "chat_id": "chat_default", "attachments": []}
 
         assert c.tool("get_replies")["structuredContent"] == {"replies": []}
 

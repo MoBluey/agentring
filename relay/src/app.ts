@@ -17,6 +17,8 @@ import { PushDispatcher } from "./push/dispatcher.js";
 import { FcmProvider } from "./push/fcm.js";
 import type { PushProvider } from "./push/push-provider.js";
 import { Calls, callRoutes, targetsOf } from "./routes/calls.js";
+import { attachmentRoutes } from "./routes/attachments.js";
+import { chatRoutes } from "./routes/chats.js";
 import { messageRoutes } from "./routes/messages.js";
 import { pairingRoutes } from "./routes/pairing.js";
 import { systemRoutes } from "./routes/system.js";
@@ -150,6 +152,8 @@ export async function buildApp(cfg: Config, opts: BuildOptions = {}): Promise<Bu
 
   systemRoutes(app, ctx);
   pairingRoutes(app, ctx);
+  chatRoutes(app, ctx);
+  attachmentRoutes(app, ctx);
   messageRoutes(app, ctx);
   callRoutes(app, ctx, calls);
   calls.resume();

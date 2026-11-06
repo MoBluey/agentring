@@ -254,7 +254,7 @@ describe("ids", () => {
 
 describe("protocol fixtures", () => {
   it("every event fixture has a known type", () => {
-    const known = ["call.invite", "call.ringing", "call.accept", "call.decline", "call.end", "call.missed", "msg.new", "msg.read", "agent.presence", "ws.hello"];
+    const known = ["chat.updated", "call.invite", "call.ringing", "call.accept", "call.decline", "call.end", "call.missed", "msg.new", "msg.read", "agent.presence", "ws.hello"];
     for (const f of readdirSync(join(PROTOCOL, "examples/events"))) {
       const e = JSON.parse(readFileSync(join(PROTOCOL, "examples/events", f), "utf8"));
       expect(known).toContain(e.type);

@@ -29,7 +29,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "dev.agentring.app"
+        applicationId = "dev.agentring.app.mo"
         minSdk = 26
         targetSdk = 36
         // Release builds pass both: -PversionName=0.2.0 -PversionCode=20099 (see docs/release.md).
@@ -37,7 +37,7 @@ android {
         versionName = providers.gradleProperty("versionName").orNull ?: "0.2.0-dev"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Hosted agentring (docs/cloud.md), offered in the setup tutorial; -PagentringCloudUrl= (empty) hides it.
-        val cloudUrl = providers.gradleProperty("agentringCloudUrl").orNull ?: "https://agentring.io"
+        val cloudUrl = providers.gradleProperty("agentringCloudUrl").orNull ?: ""
         require(cloudUrl.isEmpty() || cloudUrl.startsWith("https://")) { "agentringCloudUrl must be https://" }
         buildConfigField("String", "CLOUD_URL", "\"$cloudUrl\"")
     }
@@ -69,7 +69,7 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro", "proguard-instrumentation.pro")
             signingConfig = signingConfigs.getByName(if (releaseKeystore != null) "release" else "debug")
         }
     }
@@ -87,6 +87,8 @@ android {
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
+
+    testBuildType = providers.gradleProperty("instrumentedBuildType").orNull ?: "debug"
 
     testOptions {
         animationsDisabled = true

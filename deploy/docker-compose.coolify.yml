@@ -22,6 +22,7 @@ services:
     environment:
       AGENTRING_PUBLIC_URL: https://${AGENTRING_DOMAIN:?set AGENTRING_DOMAIN}
       AGENTRING_AGENT_NAME: ${AGENTRING_AGENT_NAME:-Agent}
+      AGENTRING_ANDROID_PACKAGE: ${AGENTRING_ANDROID_PACKAGE:-dev.agentring.app}
       FCM_SERVICE_ACCOUNT_FILE: /secrets/firebase-service-account.json
       FCM_GOOGLE_SERVICES_FILE: /secrets/google-services.json
       LIVEKIT_URL: wss://${AGENTRING_DOMAIN}

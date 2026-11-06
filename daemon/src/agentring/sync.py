@@ -30,7 +30,10 @@ def apply_event(store: Store, event: dict[str, Any]) -> None:
     """Applies one relay event to the local store. Idempotent."""
     t = event.get("type")
     if t == "msg.new":
-        store.upsert_message(event["msg_id"], event["from"], event["text"], event["ts"], event.get("reply_to"))
+        store.upsert_message(event["msg_id"], event["from"], event["text"], event["ts"], event.get("reply_to"),
+                             event.get("chat_id", "chat_default"), event.get("attachments", []))
+    elif t == "chat.updated":
+        store.upsert_chat(event["chat"])
     elif t == "msg.read":
         store.mark_read(event["msg_id"], event["ts"])
     seq = event.get("seq")

@@ -1,5 +1,9 @@
 # agentring
 
+This MoBluey fork adds a chat for each agent session, provider/model/project labels
+on messages and calls, and files in both directions. See [session chats and files](docs/attachments.md).
+The Android app uses `dev.agentring.app.mo` and installs alongside the upstream app.
+
 **Your AI agent can call you.** When it needs a decision, hits a wall or finishes a
 long job, your phone rings like a real call, even locked and in Doze. A voice AI tells
 you what's going on, you talk it through, and the agent gets the transcript and carries

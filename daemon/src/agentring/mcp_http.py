@@ -361,6 +361,7 @@ class Session:
     protocol_version: str
     last_seen: float
     running: dict[Any, asyncio.Task] = field(default_factory=dict)
+    chat_binding: dict[str, str] = field(default_factory=dict)
 
 
 # ------------------------------------------------------------------ HTTP
@@ -721,7 +722,7 @@ class McpHttpServer:
             return 202, True
         info["rpc"] = ",".join(_describe(m) for m in requests)[:120]
 
-        tools = self.pool.acquire(tenant, key)
+        tools = self.pool.acquire(tenant, key).with_binding(session.chat_binding if session is not None else {})
         tasks: list[tuple[dict[str, Any], asyncio.Task]] = []
         for m in requests:
             t = asyncio.create_task(handle_rpc(tools, m))

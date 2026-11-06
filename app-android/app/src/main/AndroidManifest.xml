@@ -50,7 +50,7 @@
             android:exported="false"
             android:launchMode="singleInstance"
             android:excludeFromRecents="true"
-            android:taskAffinity="dev.agentring.app.call"
+            android:taskAffinity="${applicationId}.call"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
             android:screenOrientation="portrait" />
@@ -75,6 +75,14 @@
         <receiver
             android:name=".notify.ReplyReceiver"
             android:exported="false" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.attachments"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/attachment_paths" />
+        </provider>
 
         <!-- Download the QR scanner module at install time instead of on first use. -->
         <meta-data

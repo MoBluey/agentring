@@ -178,6 +178,8 @@ class CallActivity : ComponentActivity() {
                 .putExtra(EXTRA_AGENT_NAME, info.agentName)
                 .putExtra(EXTRA_REASON, info.reason)
                 .putExtra(EXTRA_URGENT, info.urgent)
+                .putExtra("chat_id", info.chatId)
+                .putExtra("chat", info.chat?.let { dev.agentring.core.ProtocolJson.encodeToString(dev.agentring.core.Chat.serializer(), it) })
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
 
         private fun infoFrom(intent: Intent): CallInfo? {
@@ -188,6 +190,8 @@ class CallActivity : ComponentActivity() {
                 reason = intent.getStringExtra(EXTRA_REASON).orEmpty(),
                 urgent = intent.getBooleanExtra(EXTRA_URGENT, false),
                 expiresAt = 0,
+                chatId = intent.getStringExtra("chat_id") ?: "chat_default",
+                chat = intent.getStringExtra("chat")?.let { runCatching { dev.agentring.core.ProtocolJson.decodeFromString(dev.agentring.core.Chat.serializer(), it) }.getOrNull() },
             )
         }
     }
@@ -233,7 +237,9 @@ fun CallScreen(
                 Text(info.agentName.trim().take(1).uppercase().ifEmpty { "A" }, fontSize = 44.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
             }
             Spacer(Modifier.height(20.dp))
-            Text(info.agentName, fontSize = 34.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, modifier = Modifier.testTag("call_agent"))
+            Text(info.displayName, fontSize = 34.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, modifier = Modifier.testTag("call_agent"))
+            Spacer(Modifier.height(10.dp))
+            Text(info.callerLabel, fontSize = 16.sp, textAlign = TextAlign.Center, modifier = Modifier.testTag("call_caller"))
             Spacer(Modifier.height(10.dp))
             Text(statusText(state), fontSize = 18.sp, color = Color(0xFFB8C4CC), modifier = Modifier.testTag("call_status"))
             if (info.reason.isNotBlank()) {

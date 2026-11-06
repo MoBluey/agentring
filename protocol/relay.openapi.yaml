@@ -216,6 +216,7 @@ paths:
       summary: Call history, newest first.
       security: [{ agentKey: [] }, { deviceJwt: [] }]
       parameters:
+        - { name: chat_id, in: query, schema: { type: string } }
         - $ref: "#/components/parameters/Limit"
         - name: before
           in: query
@@ -397,6 +398,110 @@ paths:
         "200": { description: Processed (also for events that don't concern a call). }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /v1/chats:
+    post:
+      tags: [messages]
+      operationId: openChat
+      summary: Create or update an agent session by its stable client_session_id.
+      security: [{ agentKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PostChatRequest" }
+      responses:
+        "201":
+          description: Created or updated chat; only explicit metadata replaces existing fields.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Chat" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    get:
+      tags: [messages]
+      operationId: listChats
+      security: [{ agentKey: [] }, { deviceJwt: [] }]
+      responses:
+        "200":
+          description: Agent session chats, most recently updated first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [chats]
+                properties:
+                  chats: { type: array, items: { $ref: "#/components/schemas/Chat" } }
+  /v1/chats/{chat_id}:
+    get:
+      tags: [messages]
+      operationId: getChat
+      security: [{ agentKey: [] }, { deviceJwt: [] }]
+      parameters:
+        - { name: chat_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Chat metadata.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Chat" }
+        "404": { description: Chat does not exist. }
+
+  /v1/attachments:
+    post:
+      tags: [messages]
+      operationId: uploadAttachment
+      summary: Stream a file (100 MiB maximum); unposted uploads expire after 24 hours.
+      security: [{ agentKey: [] }, { deviceJwt: [] }]
+      parameters:
+        - { name: name, in: query, required: true, schema: { type: string, maxLength: 128 } }
+        - { name: chat_id, in: query, schema: { type: string, default: chat_default } }
+        - { name: media_type, in: query, schema: { type: string, maxLength: 127, default: application/octet-stream } }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "201":
+          description: Completed upload, private to the uploading principal until posted in a message.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Attachment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { description: File exceeds 100 MiB. }
+        "507": { description: Relay attachment storage is full (2 GiB maximum). }
+  /v1/attachments/{attachment_id}:
+    get:
+      tags: [messages]
+      operationId: getAttachment
+      security: [{ agentKey: [] }, { deviceJwt: [] }]
+      parameters:
+        - { name: attachment_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Attachment metadata.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Attachment" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Attachment absent or inaccessible. }
+  /v1/attachments/{attachment_id}/content:
+    get:
+      tags: [messages]
+      operationId: downloadAttachment
+      security: [{ agentKey: [] }, { deviceJwt: [] }]
+      parameters:
+        - { name: attachment_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Original bytes. Always download; never execute or render on the relay origin.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Attachment absent or inaccessible. }
+
   /v1/messages:
     post:
       tags: [messages]
@@ -423,6 +528,7 @@ paths:
       summary: Message history, oldest first.
       security: [{ agentKey: [] }, { deviceJwt: [] }]
       parameters:
+        - { name: chat_id, in: query, schema: { type: string } }
         - name: after
           in: query
           description: Cursor; return messages with `msg_id` greater than this.
@@ -777,6 +883,7 @@ components:
       type: object
       additionalProperties: false
       properties:
+        chat_id: { type: string, description: Defaults to chat_default. }
         reason:
           description: Required when the agent calls; optional when the user calls.
           type: string
@@ -803,6 +910,8 @@ components:
       type: object
       required: [call_id, direction, state, priority, agent_name, created_at]
       properties:
+        chat_id: { type: string, description: Defaults to chat_default. }
+        chat: { $ref: "#/components/schemas/Chat" }
         call_id: { $ref: "#/components/schemas/CallId" }
         direction: { $ref: "#/components/schemas/CallDirection" }
         state: { $ref: "#/components/schemas/CallState" }
@@ -840,13 +949,55 @@ components:
         call: { $ref: "#/components/schemas/Call" }
         join: { $ref: "#/components/schemas/JoinInfo" }
 
+    Caller:
+      type: object
+      additionalProperties: false
+      properties:
+        provider: { type: string, minLength: 1, maxLength: 64 }
+        model: { type: string, minLength: 1, maxLength: 128 }
+        project: { type: string, minLength: 1, maxLength: 256 }
+    PostChatRequest:
+      type: object
+      additionalProperties: false
+      required: [client_session_id]
+      properties:
+        client_session_id: { type: string, minLength: 1, maxLength: 256 }
+        title: { type: string, minLength: 1, maxLength: 256 }
+        description: { type: string, maxLength: 1024 }
+        caller: { $ref: "#/components/schemas/Caller" }
+    Chat:
+      type: object
+      required: [chat_id, client_session_id, title, description, caller, created_at, updated_at]
+      properties:
+        chat_id: { type: string }
+        client_session_id: { type: string }
+        title: { type: string }
+        description: { type: string }
+        caller: { $ref: "#/components/schemas/Caller" }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        updated_at: { $ref: "#/components/schemas/Timestamp" }
+    ChatUpdatedEvent:
+      allOf:
+        - $ref: "#/components/schemas/EventBase"
+        - type: object
+          required: [type, chat]
+          properties:
+            type: { const: chat.updated }
+            chat: { $ref: "#/components/schemas/Chat" }
+
     # ---------- messages ----------
     PostMessageRequest:
       type: object
       additionalProperties: false
       required: [text]
       properties:
-        text: { type: string, minLength: 1, maxLength: 4000 }
+        chat_id: { type: string, description: Defaults to chat_default. }
+        text: { type: string, maxLength: 4000 }
+        attachment_ids:
+          type: array
+          maxItems: 8
+          uniqueItems: true
+          items: { type: string, pattern: "^att_[0-9A-HJKMNP-TV-Z]{26}$" }
         reply_to:
           description: Optional msg_id or call_id this message responds to.
           type: string
@@ -854,13 +1005,28 @@ components:
           description: Idempotency key chosen by the sender (unique per sender).
           type: string
           maxLength: 64
+    Attachment:
+      type: object
+      required: [attachment_id, name, media_type, size_bytes, sha256, created_at, chat_id]
+      properties:
+        chat_id: { type: string }
+        attachment_id: { type: string, pattern: "^att_[0-9A-HJKMNP-TV-Z]{26}$" }
+        name: { type: string, minLength: 1, maxLength: 128 }
+        media_type: { type: string, maxLength: 127 }
+        size_bytes: { type: integer, minimum: 0, maximum: 104857600 }
+        sha256: { type: string, pattern: "^[a-f0-9]{64}$" }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
     Message:
       type: object
       required: [msg_id, from, text, created_at]
       properties:
+        chat_id: { type: string, description: Defaults to chat_default. }
         msg_id: { $ref: "#/components/schemas/MsgId" }
         from: { $ref: "#/components/schemas/Party" }
         text: { type: string }
+        attachments:
+          type: array
+          items: { $ref: "#/components/schemas/Attachment" }
         reply_to: { type: string }
         client_msg_id: { type: string }
         device_id:
@@ -884,6 +1050,7 @@ components:
 
     Event:
       oneOf:
+        - $ref: "#/components/schemas/ChatUpdatedEvent"
         - $ref: "#/components/schemas/CallInviteEvent"
         - $ref: "#/components/schemas/CallRingingEvent"
         - $ref: "#/components/schemas/CallAcceptEvent"
@@ -897,6 +1064,7 @@ components:
       discriminator:
         propertyName: type
         mapping:
+          chat.updated: "#/components/schemas/ChatUpdatedEvent"
           call.invite: "#/components/schemas/CallInviteEvent"
           call.ringing: "#/components/schemas/CallRingingEvent"
           call.accept: "#/components/schemas/CallAcceptEvent"
@@ -914,6 +1082,8 @@ components:
         - type: object
           required: [type, call_id, direction, agent_name, reason, priority, expires_at]
           properties:
+            chat_id: { type: string }
+            chat: { $ref: "#/components/schemas/Chat" }
             type: { const: call.invite }
             call_id: { $ref: "#/components/schemas/CallId" }
             direction: { $ref: "#/components/schemas/CallDirection" }
@@ -1004,10 +1174,14 @@ components:
         - type: object
           required: [type, msg_id, from, text]
           properties:
+            chat_id: { type: string }
             type: { const: msg.new }
             msg_id: { $ref: "#/components/schemas/MsgId" }
             from: { $ref: "#/components/schemas/Party" }
             text: { type: string }
+            attachments:
+              type: array
+              items: { $ref: "#/components/schemas/Attachment" }
             reply_to: { type: string }
             truncated:
               description: Only in push payloads; fetch the full message via GET /v1/messages/{msg_id}.

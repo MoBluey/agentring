@@ -115,7 +115,7 @@ def test_handshake_sessions_and_http_errors(relay: str, start):
     assert init["capabilities"] == {"tools": {"listChanged": False}}
     assert c.request("ping")["result"] == {}
     names = [t["name"] for t in c.request("tools/list")["result"]["tools"]]
-    assert names == ["send_message", "get_replies", "call", "status"]
+    assert names == ["send_message", "get_replies", "call", "status", "open_chat"]
     assert c.request("nope/method")["error"]["code"] == -32601
     assert c.request("tools/call", {"name": "nope"})["error"]["code"] == -32602
 
@@ -186,7 +186,7 @@ def test_messages_and_replies_end_to_end(relay: str, start, tmp_path: Path):
 
     sent = c.tool("send_message", text="¿Despliego?")
     msg_id = sent["structuredContent"]["msg_id"]
-    assert json.loads(sent["content"][0]["text"]) == {"msg_id": msg_id}
+    assert json.loads(sent["content"][0]["text"]) == {"msg_id": msg_id, "chat_id": "chat_default", "attachments": []}
     assert c.tool("get_replies")["structuredContent"] == {"replies": []}
     assert c.tool("send_message")["isError"]  # missing text
 
@@ -440,3 +440,40 @@ def test_cancelled_get_replies_does_not_swallow_a_reply(relay: str, tmp_path: Pa
         assert tools._new_replies(cancelled) == []
         assert [r["text"] for r in asyncio.run(tools.get_replies())["replies"]] == ["reply"]
         tools.close()
+
+
+def test_two_concurrent_sessions_keep_chat_binding_private(relay: str, start):
+    from concurrent.futures import ThreadPoolExecutor
+    s = start(relay_url=relay, poll_s=0.05)
+    a, b = Client(s.url), Client(s.url)
+    a.initialize()
+    b.initialize()
+    def open_and_send(client, session):
+        chat = client.tool("open_chat", session_id=session, provider="openai", model=session, project="fixture")["structuredContent"]
+        sent = client.tool("send_message", text=session)["structuredContent"]
+        assert sent["chat_id"] == chat["chat_id"]
+        return chat
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fa = pool.submit(open_and_send, a, "session-a")
+        fb = pool.submit(open_and_send, b, "session-b")
+        ca, cb = fa.result(), fb.result()
+    assert ca["chat_id"] != cb["chat_id"]
+    assert a.tool("send_message", text="a again")["structuredContent"]["chat_id"] == ca["chat_id"]
+    assert b.tool("send_message", text="b again")["structuredContent"]["chat_id"] == cb["chat_id"]
+    with RelayClient(relay, API_KEY) as rc:
+        phone = simulate_phone_pairing(rc.create_pairing_token()["qr_payload"])
+    for chat, text in ((ca, "reply a"), (cb, "reply b")):
+        assert httpx.post(f"{relay}/v1/messages", headers=phone["headers"], json={"text": text, "chat_id": chat["chat_id"]}).status_code == 201
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fa = pool.submit(a.tool, "get_replies")
+        fb = pool.submit(b.tool, "get_replies")
+        ra, rb = fa.result()["structuredContent"]["replies"], fb.result()["structuredContent"]["replies"]
+    assert [r["text"] for r in ra] == ["reply a"]
+    assert [r["text"] for r in rb] == ["reply b"]
+    assert a.tool("get_replies")["structuredContent"]["replies"] == []
+    assert b.tool("get_replies")["structuredContent"]["replies"] == []
+    names = {t["name"] for t in a.request("tools/list")["result"]["tools"]}
+    assert names.isdisjoint({"send_file", "download_file"})
+    assert a.request("tools/call", {"name": "send_file", "arguments": {"path": "/etc/passwd"}})["error"]["code"] == -32602
+    a.http.close()
+    b.http.close()

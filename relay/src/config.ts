@@ -91,7 +91,7 @@ export function loadConfig(): Config {
     }
     fcm = {
       serviceAccountFile: saFile,
-      client: parseGoogleServices(JSON.parse(readFileSync(gsFile, "utf8"))),
+      client: parseGoogleServices(JSON.parse(readFileSync(gsFile, "utf8")), env("AGENTRING_ANDROID_PACKAGE", ANDROID_PACKAGE)),
       apiBase: env("FCM_API_BASE", "https://fcm.googleapis.com")!,
     };
   }

@@ -14,7 +14,9 @@ import dev.agentring.app.Graph
 
 /** Which screen is on top, so a push for a conversation the user is reading doesn't notify. */
 object AppVisibility {
-    @Volatile var messagesVisible: Boolean = false
+    @Volatile var visibleChatId: String? = null
+    @Volatile var isForeground: Boolean = false
+    val requestedChat = mutableStateOf<String?>(null)
 }
 
 class MainActivity : ComponentActivity() {
@@ -31,13 +33,26 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        AppVisibility.isForeground = true
+    }
+
+    override fun onPause() {
+        AppVisibility.isForeground = false
+        super.onPause()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleIntent(intent)
     }
 
     private fun handleIntent(intent: Intent?) {
-        if (intent?.getStringExtra(EXTRA_OPEN) == OPEN_MESSAGES) openMessages.value = true
+        if (intent?.getStringExtra(EXTRA_OPEN) == OPEN_MESSAGES) {
+            AppVisibility.requestedChat.value = intent.getStringExtra("chat_id")
+            openMessages.value = true
+        }
     }
 
     companion object {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,12 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=5000")
         self.db.executescript(SCHEMA)
+        columns = {r[1] for r in self.db.execute("PRAGMA table_info(messages)")}
+        if "chat_id" not in columns:
+            self.db.execute("ALTER TABLE messages ADD COLUMN chat_id TEXT NOT NULL DEFAULT 'chat_default'")
+        if "attachments_json" not in columns:
+            self.db.execute("ALTER TABLE messages ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'")
+        self.db.execute("CREATE TABLE IF NOT EXISTS chats (chat_id TEXT PRIMARY KEY, metadata TEXT NOT NULL)")
 
     def close(self) -> None:
         self.db.close()
@@ -66,19 +73,23 @@ class Store:
         return False
 
     # messages
-    def upsert_message(self, msg_id: str, sender: str, text: str, created_at: int, reply_to: str | None = None) -> bool:
+    def upsert_message(self, msg_id: str, sender: str, text: str, created_at: int, reply_to: str | None = None,
+                       chat_id: str = "chat_default", attachments: list[dict] | None = None) -> bool:
         cur = self.db.execute(
-            "INSERT OR IGNORE INTO messages (msg_id, sender, text, reply_to, created_at) VALUES (?, ?, ?, ?, ?)",
-            (msg_id, sender, text, reply_to, created_at),
+            "INSERT OR IGNORE INTO messages (msg_id, sender, text, reply_to, created_at, chat_id, attachments_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (msg_id, sender, text, reply_to, created_at, chat_id, json.dumps(attachments or [])),
         )
         return cur.rowcount == 1
 
     def mark_read(self, msg_id: str, ts: int) -> None:
         self.db.execute("UPDATE messages SET read_at = COALESCE(read_at, ?) WHERE msg_id = ?", (ts, msg_id))
 
-    def replies(self, *, since: int | None = None, undelivered_only: bool = False, limit: int = 100) -> list[dict[str, Any]]:
+    def replies(self, *, since: int | None = None, undelivered_only: bool = False, limit: int = 100, chat_id: str | None = None) -> list[dict[str, Any]]:
         q = "SELECT * FROM messages WHERE sender = 'user'"
         args: list[Any] = []
+        if chat_id is not None:
+            q += " AND chat_id = ?"
+            args.append(chat_id)
         if since is not None:
             q += " AND created_at >= ?"
             args.append(since)
@@ -86,7 +97,14 @@ class Store:
             q += " AND delivered_at IS NULL"
         q += " ORDER BY msg_id LIMIT ?"
         args.append(limit)
-        return [dict(r) for r in self.db.execute(q, args).fetchall()]
+        rows = [dict(r) for r in self.db.execute(q, args).fetchall()]
+        for row in rows:
+            row["attachments"] = json.loads(row.pop("attachments_json"))
+        return rows
+
+    def upsert_chat(self, chat: dict) -> None:
+        self.db.execute("INSERT INTO chats VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET metadata=excluded.metadata",
+                        (chat["chat_id"], json.dumps(chat)))
 
     def mark_delivered(self, msg_ids: list[str], ts: int) -> None:
         self.db.executemany("UPDATE messages SET delivered_at = ? WHERE msg_id = ?", [(ts, m) for m in msg_ids])

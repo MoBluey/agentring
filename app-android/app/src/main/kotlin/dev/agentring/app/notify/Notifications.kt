@@ -39,15 +39,18 @@ object Notifications {
 
     private fun mutableFlag() = if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0
 
-    fun openMessagesIntent(context: Context): PendingIntent {
+    fun openMessagesIntent(context: Context, chatId: String = "chat_default"): PendingIntent {
         val i = Intent(context, MainActivity::class.java)
             .putExtra(MainActivity.EXTRA_OPEN, MainActivity.OPEN_MESSAGES)
+            .putExtra("chat_id", chatId)
+            .setData(android.net.Uri.Builder().scheme("agentring-mo").authority("messages").appendPath(chatId).build())
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         return PendingIntent.getActivity(context, 0, i, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
 
-    private fun replyAction(context: Context): NotificationCompat.Action {
-        val intent = Intent(context, ReplyReceiver::class.java)
+    private fun replyAction(context: Context, chatId: String): NotificationCompat.Action {
+        val intent = Intent(context, ReplyReceiver::class.java).putExtra("chat_id", chatId)
+            .setData(android.net.Uri.Builder().scheme("agentring-mo").authority("reply").appendPath(chatId).build())
         val pi = PendingIntent.getBroadcast(context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or mutableFlag())
         val input = RemoteInput.Builder(KEY_REPLY).setLabel(context.getString(R.string.reply)).build()
         return NotificationCompat.Action.Builder(R.drawable.ic_send, context.getString(R.string.reply), pi)
@@ -70,14 +73,19 @@ object Notifications {
         agentName: String,
         agentMessages: List<Message> = Graph.messages.unreadFromAgent(),
         sentReply: String? = null,
+        chatId: String? = null,
     ) {
         if (!canNotify(context)) return
-        val unread = agentMessages.takeLast(6)
+        val groups = agentMessages.filter { chatId == null || it.chatId == chatId }.groupBy { it.chatId }
+        if (groups.size > 1) { groups.forEach { (id, messages) -> showMessages(context, agentName, messages, chatId = id) }; return }
+        val destinationChatId = chatId ?: agentMessages.firstOrNull()?.chatId ?: "chat_default"
+        val chat = Graph.messages.chats.value.firstOrNull { it.chatId == destinationChatId }
+        val unread = groups[destinationChatId].orEmpty().takeLast(6)
         if (unread.isEmpty() && sentReply == null) return
         val me = Person.Builder().setName(context.getString(R.string.you)).build()
-        val agent = agentPerson(agentName)
+        val agent = agentPerson(chat?.let { "${it.title} · ${it.caller.label}" } ?: agentName)
         val style = NotificationCompat.MessagingStyle(me)
-        unread.forEach { style.addMessage(it.text, it.createdAt, agent) }
+        unread.forEach { style.addMessage(it.text.ifBlank { it.attachments.joinToString { attachment -> attachment.name } }, it.createdAt, agent) }
         if (sentReply != null) style.addMessage(sentReply, System.currentTimeMillis(), null as Person?)
 
         val n = NotificationCompat.Builder(context, CHANNEL_MESSAGES)
@@ -85,26 +93,26 @@ object Notifications {
             .setStyle(style)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setContentIntent(openMessagesIntent(context))
+            .setContentIntent(openMessagesIntent(context, destinationChatId))
             .setAutoCancel(true)
             .setOnlyAlertOnce(sentReply != null)
-            .addAction(replyAction(context))
+            .addAction(replyAction(context, destinationChatId))
             .build()
-        NotificationManagerCompat.from(context).notify(ID_MESSAGES, n)
+        NotificationManagerCompat.from(context).notify(destinationChatId, ID_MESSAGES, n)
     }
 
     @SuppressLint("MissingPermission")
-    fun showReplyFailed(context: Context, text: String, error: String) {
+    fun showReplyFailed(context: Context, text: String, error: String, chatId: String = "chat_default") {
         if (!canNotify(context)) return
         val n = NotificationCompat.Builder(context, CHANNEL_MESSAGES)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(context.getString(R.string.reply_failed_title))
             .setContentText("$text — $error")
             .setStyle(NotificationCompat.BigTextStyle().bigText("$text\n\n$error"))
-            .setContentIntent(openMessagesIntent(context))
+            .setContentIntent(openMessagesIntent(context, chatId))
             .setAutoCancel(true)
             .build()
-        NotificationManagerCompat.from(context).notify(ID_REPLY_FAILED, n)
+        NotificationManagerCompat.from(context).notify(chatId, ID_REPLY_FAILED, n)
     }
 
     @SuppressLint("MissingPermission")
@@ -123,7 +131,9 @@ object Notifications {
         NotificationManagerCompat.from(context).notify(ID_TEST, n)
     }
 
-    fun cancelMessages(context: Context) {
-        NotificationManagerCompat.from(context).cancel(ID_MESSAGES)
+    fun cancelMessages(context: Context, chatId: String? = null) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        if (chatId != null) manager.cancel(chatId, ID_MESSAGES)
+        else manager.activeNotifications.filter { it.id == ID_MESSAGES }.forEach { manager.cancel(it.tag, it.id) }
     }
 }

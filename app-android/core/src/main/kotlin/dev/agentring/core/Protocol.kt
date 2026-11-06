@@ -70,6 +70,36 @@ data class PairResponse(
 )
 
 @Serializable
+data class CallerContext(val provider: String? = null, val model: String? = null, val project: String? = null) {
+    val label: String get() = listOf(provider ?: "Unknown provider", model ?: "Unknown model", project ?: "Unknown project").joinToString(" · ")
+}
+
+@Serializable
+data class Chat(
+    @SerialName("chat_id") val chatId: String,
+    @SerialName("client_session_id") val clientSessionId: String,
+    val title: String,
+    val description: String = "",
+    val caller: CallerContext = CallerContext(),
+    @SerialName("created_at") val createdAt: Long,
+    @SerialName("updated_at") val updatedAt: Long,
+)
+
+@Serializable
+data class ChatPage(val chats: List<Chat>)
+
+@Serializable
+data class Attachment(
+    @SerialName("attachment_id") val attachmentId: String,
+    val name: String,
+    @SerialName("media_type") val mediaType: String,
+    @SerialName("size_bytes") val sizeBytes: Long,
+    val sha256: String,
+    @SerialName("created_at") val createdAt: Long,
+    @SerialName("chat_id") val chatId: String = "chat_default",
+)
+
+@Serializable
 data class Message(
     @SerialName("msg_id") val msgId: String,
     val from: String,
@@ -79,6 +109,8 @@ data class Message(
     @SerialName("device_id") val deviceId: String? = null,
     @SerialName("created_at") val createdAt: Long,
     @SerialName("read_at") val readAt: Long? = null,
+    val attachments: List<Attachment> = emptyList(),
+    @SerialName("chat_id") val chatId: String = "chat_default",
 ) {
     val fromAgent: Boolean get() = from == FROM_AGENT
 
@@ -117,6 +149,8 @@ data class Call(
     @SerialName("end_reason") val endReason: String? = null,
     @SerialName("duration_ms") val durationMs: Long? = null,
     @SerialName("device_id") val deviceId: String? = null,
+    @SerialName("chat_id") val chatId: String = "chat_default",
+    val chat: Chat? = null,
 ) {
     val isRinging: Boolean get() = state == "ringing"
     val isActive: Boolean get() = state == "active"
@@ -159,6 +193,8 @@ sealed interface Event {
         val reason: String,
         val priority: String,
         @SerialName("expires_at") val expiresAt: Long,
+        @SerialName("chat_id") val chatId: String = "chat_default",
+        val chat: Chat? = null,
     ) : Event
 
     @Serializable
@@ -200,9 +236,17 @@ sealed interface Event {
         val text: String,
         @SerialName("reply_to") val replyTo: String? = null,
         val truncated: Boolean? = null,
+        val attachments: List<Attachment> = emptyList(),
+        @SerialName("chat_id") val chatId: String = "chat_default",
     ) : Event {
-        fun toMessage() = Message(msgId = msgId, from = from, text = text, replyTo = replyTo, createdAt = ts)
+        fun toMessage() = Message(msgId = msgId, from = from, text = text, replyTo = replyTo, createdAt = ts, attachments = attachments, chatId = chatId)
     }
+
+    @Serializable
+    data class ChatUpdated(
+        override val type: String, override val id: String, override val ts: Long, override val seq: Long? = null,
+        val chat: Chat,
+    ) : Event
 
     @Serializable
     data class MsgRead(
@@ -243,6 +287,7 @@ sealed interface Event {
                 "call.end" -> j.decodeFromJsonElement(CallEnd.serializer(), obj)
                 "call.missed" -> j.decodeFromJsonElement(CallMissed.serializer(), obj)
                 "msg.new" -> j.decodeFromJsonElement(MsgNew.serializer(), obj)
+                "chat.updated" -> j.decodeFromJsonElement(ChatUpdated.serializer(), obj)
                 "msg.read" -> j.decodeFromJsonElement(MsgRead.serializer(), obj)
                 "agent.presence" -> j.decodeFromJsonElement(AgentPresence.serializer(), obj)
                 "ws.hello" -> j.decodeFromJsonElement(WsHello.serializer(), obj)

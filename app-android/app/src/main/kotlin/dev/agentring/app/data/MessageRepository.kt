@@ -2,6 +2,7 @@ package dev.agentring.app.data
 
 import android.content.Context
 import android.util.Log
+import dev.agentring.core.Chat
 import dev.agentring.core.Event
 import dev.agentring.core.Message
 import dev.agentring.core.ProtocolJson
@@ -18,6 +19,10 @@ import java.io.File
  */
 class MessageRepository(context: Context) {
     private val cache = File(context.filesDir, "messages.json")
+    private val chatCache = File(context.filesDir, "chats.json")
+    private val chatSerializer = ListSerializer(Chat.serializer())
+    private val _chats = MutableStateFlow(runCatching { ProtocolJson.decodeFromString(chatSerializer, chatCache.readText()) }.getOrDefault(emptyList()))
+    val chats: StateFlow<List<Chat>> = _chats
     private val prefs = context.getSharedPreferences("agentring_state", Context.MODE_PRIVATE)
     private val serializer = ListSerializer(Message.serializer())
 
@@ -62,9 +67,15 @@ class MessageRepository(context: Context) {
         (list.filter { it.msgId != m.msgId } + merged).sortedBy { it.msgId }
     }
 
+    fun upsertChat(chat: Chat) = synchronized(this) {
+        _chats.value = (_chats.value.filter { it.chatId != chat.chatId } + chat).sortedByDescending { it.updatedAt }
+        runCatching { val temporary = File(chatCache.parentFile, "chats.json.tmp"); temporary.writeText(ProtocolJson.encodeToString(chatSerializer, _chats.value)); temporary.renameTo(chatCache) }
+    }
+
     /** Applies a relay event. `advanceSeq` is false for push-delivered events (the stream may still be behind). */
     fun apply(event: Event, advanceSeq: Boolean) {
         when (event) {
+            is Event.ChatUpdated -> upsertChat(event.chat)
             is Event.MsgNew -> upsert(event.toMessage(), truncated = event.truncated == true)
             is Event.MsgRead -> mutate { list ->
                 list.map { if (it.msgId == event.msgId && it.readAt == null) it.copy(readAt = event.ts) else it }
@@ -77,6 +88,7 @@ class MessageRepository(context: Context) {
 
     /** Pulls messages we don't have yet. Blocking; call from a background thread. */
     fun refresh(api: RelayApi) {
+        api.listChats().chats.forEach(::upsertChat)
         var after = _messages.value.lastOrNull()?.msgId
         while (true) {
             val page = api.listMessages(after = after)
@@ -86,9 +98,20 @@ class MessageRepository(context: Context) {
         }
     }
 
+    /** Restores a selected chat even when its older messages were evicted from the small cache. */
+    fun refreshChat(api: RelayApi, chatId: String) {
+        var after: String? = null
+        while (true) {
+            val page = api.listMessages(after = after, chatId = chatId)
+            page.messages.forEach { upsert(it) }
+            if (!page.hasMore || page.messages.isEmpty()) return
+            after = page.messages.last().msgId
+        }
+    }
+
     /** Sends read receipts for the agent's messages. Blocking. */
-    fun markAgentMessagesRead(api: RelayApi) {
-        val unread = _messages.value.filter { it.fromAgent && it.readAt == null }
+    fun markAgentMessagesRead(api: RelayApi, chatId: String? = null) {
+        val unread = _messages.value.filter { it.fromAgent && it.readAt == null && (chatId == null || it.chatId == chatId) }
         val now = System.currentTimeMillis()
         for (m in unread) {
             try {
@@ -104,6 +127,8 @@ class MessageRepository(context: Context) {
     fun unreadFromAgent(): List<Message> = _messages.value.filter { it.fromAgent && it.readAt == null }
 
     fun clear() = synchronized(this) {
+        _chats.value = emptyList()
+        chatCache.delete()
         _messages.value = emptyList()
         cache.delete()
         prefs.edit().remove(KEY_SEQ).apply()

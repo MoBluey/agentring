@@ -324,6 +324,88 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/chats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listChats"];
+        put?: never;
+        /** Create or update an agent session by its stable client_session_id. */
+        post: operations["openChat"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/chats/{chat_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getChat"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/attachments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Stream a file (100 MiB maximum); unposted uploads expire after 24 hours. */
+        post: operations["uploadAttachment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/attachments/{attachment_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getAttachment"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/attachments/{attachment_id}/content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["downloadAttachment"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/messages": {
         parameters: {
             query?: never;
@@ -550,6 +632,8 @@ export interface components {
             has_push_token: boolean;
         };
         CreateCallRequest: {
+            /** @description Defaults to chat_default. */
+            chat_id?: string;
             /** @description Required when the agent calls; optional when the user calls. */
             reason?: string;
             /** @default normal */
@@ -566,6 +650,9 @@ export interface components {
             device_ids?: components["schemas"]["DeviceId"][];
         };
         Call: {
+            /** @description Defaults to chat_default. */
+            chat_id?: string;
+            chat?: components["schemas"]["Chat"];
             call_id: components["schemas"]["CallId"];
             direction: components["schemas"]["CallDirection"];
             state: components["schemas"]["CallState"];
@@ -604,17 +691,63 @@ export interface components {
             call: components["schemas"]["Call"];
             join: components["schemas"]["JoinInfo"];
         };
+        Caller: {
+            provider?: string;
+            model?: string;
+            project?: string;
+        };
+        PostChatRequest: {
+            client_session_id: string;
+            title?: string;
+            description?: string;
+            caller?: components["schemas"]["Caller"];
+        };
+        Chat: {
+            chat_id: string;
+            client_session_id: string;
+            title: string;
+            description: string;
+            caller: components["schemas"]["Caller"];
+            created_at: components["schemas"]["Timestamp"];
+            updated_at: components["schemas"]["Timestamp"];
+        };
+        ChatUpdatedEvent: components["schemas"]["EventBase"] & {
+            /** @constant */
+            type: "chat.updated";
+            chat: components["schemas"]["Chat"];
+        } & {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "chat.updated";
+        };
         PostMessageRequest: {
+            /** @description Defaults to chat_default. */
+            chat_id?: string;
             text: string;
+            attachment_ids?: string[];
             /** @description Optional msg_id or call_id this message responds to. */
             reply_to?: string;
             /** @description Idempotency key chosen by the sender (unique per sender). */
             client_msg_id?: string;
         };
+        Attachment: {
+            chat_id: string;
+            attachment_id: string;
+            name: string;
+            media_type: string;
+            size_bytes: number;
+            sha256: string;
+            created_at: components["schemas"]["Timestamp"];
+        };
         Message: {
+            /** @description Defaults to chat_default. */
+            chat_id?: string;
             msg_id: components["schemas"]["MsgId"];
             from: components["schemas"]["Party"];
             text: string;
+            attachments?: components["schemas"]["Attachment"][];
             reply_to?: string;
             client_msg_id?: string;
             /** @description Sending device when `from` = user. */
@@ -629,7 +762,7 @@ export interface components {
             /** @description Position in the relay event log. Absent on ephemeral events. */
             seq?: number;
         };
-        Event: components["schemas"]["CallInviteEvent"] | components["schemas"]["CallRingingEvent"] | components["schemas"]["CallAcceptEvent"] | components["schemas"]["CallDeclineEvent"] | components["schemas"]["CallEndEvent"] | components["schemas"]["CallMissedEvent"] | components["schemas"]["MsgNewEvent"] | components["schemas"]["MsgReadEvent"] | components["schemas"]["AgentPresenceEvent"] | components["schemas"]["WsHelloEvent"];
+        Event: components["schemas"]["ChatUpdatedEvent"] | components["schemas"]["CallInviteEvent"] | components["schemas"]["CallRingingEvent"] | components["schemas"]["CallAcceptEvent"] | components["schemas"]["CallDeclineEvent"] | components["schemas"]["CallEndEvent"] | components["schemas"]["CallMissedEvent"] | components["schemas"]["MsgNewEvent"] | components["schemas"]["MsgReadEvent"] | components["schemas"]["AgentPresenceEvent"] | components["schemas"]["WsHelloEvent"];
         /**
          * @example {
          *       "type": "call.invite",
@@ -645,6 +778,8 @@ export interface components {
          *     }
          */
         CallInviteEvent: components["schemas"]["EventBase"] & {
+            chat_id?: string;
+            chat?: components["schemas"]["Chat"];
             /** @constant */
             type: "call.invite";
             call_id: components["schemas"]["CallId"];
@@ -747,11 +882,13 @@ export interface components {
          *     }
          */
         MsgNewEvent: components["schemas"]["EventBase"] & {
+            chat_id?: string;
             /** @constant */
             type: "msg.new";
             msg_id: components["schemas"]["MsgId"];
             from: components["schemas"]["Party"];
             text: string;
+            attachments?: components["schemas"]["Attachment"][];
             reply_to?: string;
             /** @description Only in push payloads; fetch the full message via GET /v1/messages/{msg_id}. */
             truncated?: boolean;
@@ -1066,6 +1203,7 @@ export interface operations {
     listCalls: {
         parameters: {
             query?: {
+                chat_id?: string;
                 limit?: components["parameters"]["Limit"];
                 /** @description Cursor; return calls with `call_id` lower than this. */
                 before?: components["schemas"]["CallId"];
@@ -1340,9 +1478,191 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
         };
     };
+    listChats: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Agent session chats, most recently updated first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        chats: components["schemas"]["Chat"][];
+                    };
+                };
+            };
+        };
+    };
+    openChat: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PostChatRequest"];
+            };
+        };
+        responses: {
+            /** @description Created or updated chat; only explicit metadata replaces existing fields. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Chat"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getChat: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                chat_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Chat metadata. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Chat"];
+                };
+            };
+            /** @description Chat does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    uploadAttachment: {
+        parameters: {
+            query: {
+                name: string;
+                chat_id?: string;
+                media_type?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            /** @description Completed upload, private to the uploading principal until posted in a message. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Attachment"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            /** @description File exceeds 100 MiB. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Relay attachment storage is full (2 GiB maximum). */
+            507: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getAttachment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                attachment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Attachment metadata. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Attachment"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description Attachment absent or inaccessible. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    downloadAttachment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                attachment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Original bytes. Always download; never execute or render on the relay origin. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": string;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description Attachment absent or inaccessible. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     listMessages: {
         parameters: {
             query?: {
+                chat_id?: string;
                 /** @description Cursor; return messages with `msg_id` greater than this. */
                 after?: components["schemas"]["MsgId"];
                 /** @description Return messages created at or after this time (ms). */

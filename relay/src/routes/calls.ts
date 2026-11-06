@@ -6,11 +6,15 @@ import { newId } from "../ids.js";
 import type { Event, Schemas } from "../protocol.js";
 import { callMsLeft, checkCall } from "../quota.js";
 
+import { DEFAULT_CHAT, getChat, touchChat } from "./chats.js";
+
 type Call = Schemas["Call"];
 type CallState = Schemas["CallState"];
 type Direction = Schemas["CallDirection"];
 
 interface CallRow {
+  chat_id: string;
+  chat: string | null;
   call_id: string;
   direction: Direction;
   state: CallState;
@@ -43,6 +47,8 @@ export function canSee(r: Pick<CallRow, "device_ids">, p: Principal): boolean {
 export function callFromRow(r: CallRow): Call {
   return {
     call_id: r.call_id,
+    chat_id: r.chat_id,
+    ...(r.chat ? { chat: JSON.parse(r.chat) as Schemas["Chat"] } : {}),
     direction: r.direction,
     state: r.state,
     ...(r.reason ? { reason: r.reason } : {}),
@@ -202,8 +208,11 @@ export class Calls {
     if (this.open()) throw new ApiError(409, "busy", "Another call is ringing or active");
     checkCall(this.ctx.db, this.ctx.limits());
 
+    const chat = getChat(this.ctx, body.chat_id ?? DEFAULT_CHAT);
     const now = Date.now();
     const row: CallRow = {
+      chat_id: chat.chat_id,
+      chat: JSON.stringify(chat),
       call_id: newId("call"),
       direction,
       state: "ringing",
@@ -221,10 +230,10 @@ export class Calls {
     };
     this.ctx.db
       .prepare(
-        `INSERT INTO calls (call_id, direction, state, reason, priority, agent_name, created_at, expires_at, device_id, device_ids)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO calls (call_id, direction, state, reason, priority, agent_name, created_at, expires_at, device_id, device_ids, chat_id, chat)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(row.call_id, direction, "ringing", row.reason, row.priority, row.agent_name, now, row.expires_at, row.device_id, row.device_ids);
+      .run(row.call_id, direction, "ringing", row.reason, row.priority, row.agent_name, now, row.expires_at, row.device_id, row.device_ids, row.chat_id, row.chat);
     if (direction === "agent_to_user") {
       const devs =
         targets ??
@@ -235,8 +244,11 @@ export class Calls {
     } else if (p.kind === "device") {
       this.setPart(row.call_id, p.deviceId, "joined");
     }
+    touchChat(this.ctx, chat.chat_id);
     this.ctx.events.emit({
       type: "call.invite",
+      chat_id: chat.chat_id,
+      chat,
       call_id: row.call_id,
       direction,
       agent_name: row.agent_name,
@@ -526,6 +538,7 @@ export function callRoutes(app: FastifyInstance, ctx: Ctx, calls: Calls): void {
           type: "object",
           additionalProperties: false,
           properties: {
+            chat_id: { type: "string", maxLength: 64 },
             reason: { type: "string", maxLength: 500 },
             priority: { type: "string", enum: ["normal", "urgent"] },
             agent_name: { type: "string", minLength: 1, maxLength: 64 },
@@ -553,7 +566,7 @@ export function callRoutes(app: FastifyInstance, ctx: Ctx, calls: Calls): void {
     },
   );
 
-  app.get<{ Querystring: { limit?: number; before?: string } }>(
+  app.get<{ Querystring: { limit?: number; before?: string; chat_id?: string } }>(
     "/v1/calls",
     {
       preHandler: auth,
@@ -562,20 +575,22 @@ export function callRoutes(app: FastifyInstance, ctx: Ctx, calls: Calls): void {
           type: "object",
           properties: {
             limit: { type: "integer", minimum: 1, maximum: 500, default: 100 },
+            chat_id: { type: "string", maxLength: 64 },
             before: { type: "string", maxLength: 64 },
           },
         },
       },
     },
     async (req) => {
-      const { limit = 100, before } = req.query;
+      const { limit = 100, before, chat_id } = req.query;
       const p = principal(req);
       // Devices don't see targeted calls that are not for them.
       const where = [
+        ...(chat_id ? ["chat_id = ?"] : []),
         ...(before ? ["call_id < ?"] : []),
         ...(p.kind === "device" ? ["(device_ids IS NULL OR EXISTS (SELECT 1 FROM json_each(calls.device_ids) WHERE value = ?))"] : []),
       ];
-      const args = [...(before ? [before] : []), ...(p.kind === "device" ? [p.deviceId] : []), limit];
+      const args = [...(chat_id ? [chat_id] : []), ...(before ? [before] : []), ...(p.kind === "device" ? [p.deviceId] : []), limit];
       const rows = ctx.db
         .prepare(`SELECT * FROM calls ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY call_id DESC LIMIT ?`)
         .all(...args) as unknown as CallRow[];

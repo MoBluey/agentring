@@ -38,9 +38,14 @@ data class CallInfo(
     val reason: String,
     val urgent: Boolean,
     val expiresAt: Long,
+    val chatId: String = "chat_default",
+    val chat: dev.agentring.core.Chat? = null,
 ) {
+    val callerLabel: String get() = chat?.caller?.label ?: "Unknown provider · Unknown model · Unknown project"
+    val displayName: String get() = chat?.title ?: agentName
+    val notificationText: String get() = "$callerLabel · $reason"
     companion object {
-        fun of(call: Call) = CallInfo(call.callId, call.agentName, call.reason.orEmpty(), call.priority == "urgent", expiresAt = 0)
+        fun of(call: Call) = CallInfo(call.callId, call.agentName, call.reason.orEmpty(), call.priority == "urgent", expiresAt = 0, chatId = call.chatId, chat = call.chat)
     }
 }
 
@@ -128,7 +133,7 @@ class CallManager(private val context: Context) : TelecomBridge.Listener {
             Log.i(TAG, "ignoring expired invite ${invite.callId}")
             return
         }
-        val info = CallInfo(invite.callId, invite.agentName, invite.reason, invite.priority == "urgent", invite.expiresAt)
+        val info = CallInfo(invite.callId, invite.agentName, invite.reason, invite.priority == "urgent", invite.expiresAt, invite.chatId, invite.chat)
         synchronized(seen) {
             if (!seen.add(invite.callId)) return
             while (seen.size > 50) seen.remove(seen.first())

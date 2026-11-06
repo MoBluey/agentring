@@ -21,14 +21,28 @@ export function signEvent(pushSecret: string, eventJson: string): string {
 
 export function buildPayload(relayId: string, pushSecret: string, event: Event): PushPayload {
   let json = JSON.stringify(event);
+  if (event.type === "call.invite" && Buffer.byteLength(json) > MAX_EVENT_BYTES) {
+    const compact = { ...event, device_ids: undefined, chat: event.chat ? {
+      ...event.chat, client_session_id: "", title: "", description: "",
+    } : undefined };
+    let reason = event.reason;
+    json = JSON.stringify(compact);
+    while (Buffer.byteLength(json) > MAX_EVENT_BYTES && reason.length) {
+      reason = Array.from(reason).slice(0, Math.max(0, Array.from(reason).length - 64)).join("");
+      json = JSON.stringify({ ...compact, reason });
+    }
+  }
   if (event.type === "msg.new") {
+    // Large metadata is fetched over authenticated REST using the message ID.
+    if (Buffer.byteLength(json) > MAX_EVENT_BYTES) json = JSON.stringify({ ...event, attachments: [], truncated: true });
+    const pushEvent = JSON.parse(json) as Event;
     let text = event.text;
     while (Buffer.byteLength(json) > MAX_EVENT_BYTES && text.length > 0) {
       const overflow = Buffer.byteLength(json) - MAX_EVENT_BYTES;
       // Cut by code points so we never split a surrogate pair.
       const chars = Array.from(text);
       text = chars.slice(0, Math.max(0, chars.length - Math.max(overflow, 16))).join("");
-      json = JSON.stringify({ ...event, text, truncated: true });
+      json = JSON.stringify({ ...pushEvent, text, truncated: true });
     }
   }
   return { v: "1", relay_id: relayId, event: json, sig: signEvent(pushSecret, json) };

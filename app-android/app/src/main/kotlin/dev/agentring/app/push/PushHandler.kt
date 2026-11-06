@@ -37,7 +37,9 @@ object PushHandler {
                     }
                 }
                 Graph.messages.upsert(msg, truncated = truncated)
-                if (msg.fromAgent && !AppVisibility.messagesVisible) {
+                if (msg.fromAgent && (!AppVisibility.isForeground || AppVisibility.visibleChatId != msg.chatId)) {
+                    // A known coding session may have changed models while the socket was stopped.
+                    runCatching { Graph.api()?.getChat(msg.chatId) }.getOrNull()?.let(Graph.messages::upsertChat)
                     Notifications.showMessages(context, p.agentName)
                     Outcome.Notified(msg.msgId)
                 } else {
