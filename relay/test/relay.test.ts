@@ -161,7 +161,7 @@ describe("messages", () => {
     expect(read.statusCode).toBe(204);
     await b.app.inject({ method: "POST", url: `/v1/messages/${a.msg_id}/read`, headers: AGENT });
     const ev = (await b.app.inject({ url: "/v1/events", headers: AGENT })).json().events;
-    expect(ev.map((e: { type: string }) => e.type)).toEqual(["msg.new", "msg.read"]);
+    expect(ev.map((e: { type: string }) => e.type)).toEqual(["msg.new", "msg.delivered", "msg.read"]);
     expect(ev[1]).toMatchObject({ msg_id: a.msg_id, by: "agent" });
 
     // can't mark your own message read
@@ -254,7 +254,7 @@ describe("ids", () => {
 
 describe("protocol fixtures", () => {
   it("every event fixture has a known type", () => {
-    const known = ["chat.updated", "call.invite", "call.ringing", "call.accept", "call.decline", "call.end", "call.missed", "msg.new", "msg.read", "agent.presence", "ws.hello"];
+    const known = ["question.answered", "msg.delivered", "chat.updated", "call.invite", "call.ringing", "call.accept", "call.decline", "call.end", "call.missed", "msg.new", "msg.read", "agent.presence", "ws.hello"];
     for (const f of readdirSync(join(PROTOCOL, "examples/events"))) {
       const e = JSON.parse(readFileSync(join(PROTOCOL, "examples/events", f), "utf8"));
       expect(known).toContain(e.type);

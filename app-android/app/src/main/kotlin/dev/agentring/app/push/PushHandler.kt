@@ -36,11 +36,23 @@ object PushHandler {
                         truncated = false
                     }
                 }
-                Graph.messages.upsert(msg, truncated = truncated)
+                // A partial push is only a hint. Never store/acknowledge its incomplete body.
+                if (truncated) {
+                    if (event.from == "agent") {
+                        Notifications.showPendingMessage(context, p.agentName, event.chatId)
+                        return Outcome.Notified(event.msgId)
+                    }
+                    return Outcome.Ignored("incomplete message; waiting for hydration")
+                }
+                Graph.messages.upsert(msg)
+                if (msg.fromAgent) Graph.api()?.let { api ->
+                    Graph.messages.markAgentMessagesDelivered(api)
+                    if (AppVisibility.isForeground && AppVisibility.visibleChatId == msg.chatId) Graph.messages.markAgentMessagesRead(api, msg.chatId)
+                }
                 if (msg.fromAgent && (!AppVisibility.isForeground || AppVisibility.visibleChatId != msg.chatId)) {
                     // A known coding session may have changed models while the socket was stopped.
                     runCatching { Graph.api()?.getChat(msg.chatId) }.getOrNull()?.let(Graph.messages::upsertChat)
-                    Notifications.showMessages(context, p.agentName)
+                    Notifications.showMessages(context, p.agentName, chatId = msg.chatId)
                     Outcome.Notified(msg.msgId)
                 } else {
                     Outcome.Applied

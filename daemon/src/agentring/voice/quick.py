@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .agents import AgentsConfig, Consultations
-from .providers import PROVIDERS, VoiceChoice
+from .providers import PROVIDERS, PreparedCall, VoiceChoice, VoiceConfigError
 from .session import VoiceAgent
 from .tools import McpClient, Tool, mcp_tools
 
@@ -41,16 +42,22 @@ class BuiltAgent:
     agent: VoiceAgent
     mcp_clients: list[McpClient]
     consultations: Consultations | None = None
+    prepared: PreparedCall | None = None
 
     async def aclose(self, *, wait_answers_s: float | None = 0) -> None:
         """Closes the MCP clients. Agents' answers still on their way get `wait_answers_s`
         (None = as long as they take) to arrive as messages; then they are stopped."""
-        if self.consultations is not None:
-            if wait_answers_s != 0:
-                await self.consultations.drain(wait_answers_s)
-            await self.consultations.aclose()
-        for c in self.mcp_clients:
-            await c.aclose()
+        try:
+            if self.consultations is not None:
+                if wait_answers_s != 0:
+                    await self.consultations.drain(wait_answers_s)
+                await self.consultations.aclose()
+            for c in self.mcp_clients:
+                await c.aclose()
+        finally:
+            if self.prepared is not None and self.prepared.close is not None:
+                close, self.prepared.close = self.prepared.close, None
+                await close()
 
 
 async def build_agent(
@@ -62,6 +69,8 @@ async def build_agent(
     agents: AgentsConfig | None = None,
     model: str | None = None,
     voice: str | None = None,
+    call: dict | None = None,
+    relay: Any = None,
 ) -> BuiltAgent:
     """A voice AI (`resolve_voice(...)`, or a Gemini API key with `model`/`voice`) with the tools of
     the given MCP servers (only `allow` if given) and of agents.yaml (its MCP servers, and
@@ -74,16 +83,32 @@ async def build_agent(
     servers = [(url, allow, None) for url in mcp or []]
     servers += [(m.url, m.tools, m.headers) for m in (agents.mcp if agents else [])]
     try:
+        if call and call.get("session_mode"):
+            prepare = getattr(voice_ai, "prepare_call", None)
+            if not callable(prepare):
+                raise VoiceConfigError("Selected provider has no real session preparation hook")
+            prepared = await prepare(call, relay=relay)
+            if not isinstance(prepared, PreparedCall):
+                raise VoiceConfigError("Provider must return PreparedCall")
+            built.prepared = prepared
+            binding = prepared.session
+            if not callable(prepared.backend) or not isinstance(binding, dict) or binding.get("callee") != call.get("callee"):
+                raise VoiceConfigError("Provider returned a mismatched call binding")
+            session_id = binding.get("client_session_id")
+            if not isinstance(session_id, str) or not session_id or session_id.startswith("pending:") or not binding.get("caller", {}).get("provider"):
+                raise VoiceConfigError("Provider did not return a real session identity")
+            if call["session_mode"] == "existing" and session_id != call["chat"]["client_session_id"]:
+                raise VoiceConfigError("Existing call must attach to the selected session")
         for url, only, headers in servers:
             found, client = await mcp_tools(url, allow=only, headers=headers)
             tools += found
             built.mcp_clients.append(client)
+        if agents and agents.agents:
+            built.consultations = Consultations(agents.agents)
+            tools.append(built.consultations.tool())
+        text = read_instructions(instructions)
+        built.agent = VoiceAgent(built.prepared.backend if built.prepared else voice_ai.factory(), text, tools)
+        return built
     except BaseException:
         await asyncio.shield(built.aclose())
         raise
-    if agents and agents.agents:
-        built.consultations = Consultations(agents.agents)
-        tools.append(built.consultations.tool())
-    text = read_instructions(instructions)
-    built.agent = VoiceAgent(voice_ai.factory(), text, tools)
-    return built

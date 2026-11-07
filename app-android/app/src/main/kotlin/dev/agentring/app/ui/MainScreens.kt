@@ -175,7 +175,11 @@ private fun HomeScreen(pairing: Pairing) {
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                CallAgentButton(pairing, relayConnected = relay == RelaySocket.State.CONNECTED, agentOnline = agent == true, revoked = revoked)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    for (callee in listOf("claude", "codex")) Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                        CallAgentButton(pairing, relayConnected = relay == RelaySocket.State.CONNECTED, agentOnline = agent == true, revoked = revoked, callee = callee)
+                    }
+                }
             }
         }
 
@@ -216,7 +220,8 @@ private fun HomeScreen(pairing: Pairing) {
 
 /** "Call agent" (M4): places a call to the agent and opens the call screen. */
 @Composable
-private fun CallAgentButton(pairing: Pairing, relayConnected: Boolean, agentOnline: Boolean, revoked: Boolean) {
+internal fun CallAgentButton(pairing: Pairing, relayConnected: Boolean, agentOnline: Boolean, revoked: Boolean, callee: String? = null, chatId: String? = null, compact: Boolean = false) {
+    val targetName = if (chatId != null) "this session" else if (callee == "codex") "Codex" else "Claude"
     val ctx = LocalContext.current
     val call by Graph.calls.state.collectAsStateWithLifecycle()
     var placing by remember { mutableStateOf(false) }
@@ -229,7 +234,7 @@ private fun CallAgentButton(pairing: Pairing, relayConnected: Boolean, agentOnli
         error = null
         // Not the composition's scope: leaving the screen mid-request must not orphan a ringing call.
         Graph.appScope.launch(Dispatchers.Main.immediate) {
-            val failure = Graph.calls.callAgent()
+            val failure = Graph.calls.callAgent(callee = callee, chatId = chatId)
             placing = false
             if (failure == null) ctx.startActivity(CallActivity.outgoingIntent(ctx)) else error = failure
         }
@@ -239,6 +244,14 @@ private fun CallAgentButton(pairing: Pairing, relayConnected: Boolean, agentOnli
 
     val enabled = relayConnected && agentOnline && idle && !placing && !revoked
     val scheme = MaterialTheme.colorScheme
+    if (compact) {
+        Column(horizontalAlignment = Alignment.End) {
+            TextButton(onClick = { if (CallPermissions.hasMic(ctx)) place() else mic.launch(Manifest.permission.RECORD_AUDIO) },
+                enabled = enabled, modifier = Modifier.testTag("call_session")) { Text(if (placing) "Calling…" else "Call") }
+            error?.let { Text(stringResource(it), style = MaterialTheme.typography.labelSmall, color = scheme.error) }
+        }
+        return
+    }
     Box(contentAlignment = Alignment.Center, modifier = Modifier.size(132.dp)) {
         if (enabled) {
             Box(
@@ -252,23 +265,23 @@ private fun CallAgentButton(pairing: Pairing, relayConnected: Boolean, agentOnli
             onClick = { if (CallPermissions.hasMic(ctx)) place() else mic.launch(Manifest.permission.RECORD_AUDIO) },
             enabled = enabled,
             shape = CircleShape,
-            modifier = Modifier.size(92.dp).testTag("call_agent"),
+            modifier = Modifier.size(92.dp).testTag("call_$callee"),
         ) {
             if (placing) {
                 CircularProgressIndicator(Modifier.size(32.dp), color = scheme.onPrimary, strokeWidth = 3.dp)
             } else {
-                Icon(painterResource(R.drawable.ic_call), stringResource(R.string.call_agent), Modifier.size(40.dp))
+                Icon(painterResource(R.drawable.ic_call), stringResource(R.string.call_agent_named, targetName), Modifier.size(40.dp))
             }
         }
     }
-    Text(stringResource(R.string.call_agent_named, pairing.agentName), style = MaterialTheme.typography.titleLarge)
+    Text(stringResource(R.string.call_agent_named, targetName), style = MaterialTheme.typography.titleLarge)
     val hint = when {
         error != null -> stringResource(error!!)
-        placing -> stringResource(R.string.call_calling, pairing.agentName)
+        placing -> stringResource(R.string.call_calling, targetName)
         !relayConnected -> stringResource(R.string.call_agent_needs_relay)
         !agentOnline -> stringResource(R.string.call_agent_offline)
         !idle -> stringResource(R.string.call_agent_in_call)
-        else -> stringResource(R.string.call_agent_hint, pairing.agentName)
+        else -> "Start a new $targetName session"
     }
     Text(
         hint,
@@ -289,7 +302,7 @@ private fun JoinCallCard(offer: JoinOffer) {
         modifier = Modifier.fillMaxWidth().testTag("join_call_card"),
     ) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(stringResource(R.string.call_in_progress_with, offer.info.agentName), style = MaterialTheme.typography.titleMedium)
+            Text(stringResource(R.string.call_in_progress_with, offer.info.displayName), style = MaterialTheme.typography.titleMedium)
             if (offer.info.reason.isNotBlank()) Text(offer.info.reason, style = MaterialTheme.typography.bodyMedium)
             Button(
                 onClick = { ctx.startActivity(CallActivity.joinIntent(ctx, offer.info)) },

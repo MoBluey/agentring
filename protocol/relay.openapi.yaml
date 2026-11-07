@@ -281,6 +281,11 @@ paths:
         phone that missed its ring window, declined or left uses
         `POST /v1/calls/{call_id}/join` instead.
       security: [{ agentKey: [] }, { deviceJwt: [] }]
+      requestBody:
+        description: Required session binding for explicit new/existing user calls; optional for legacy calls.
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AcceptCallRequest" }
       responses:
         "200":
           description: Accepted; state `active`. Contains the callee's join info.
@@ -345,6 +350,14 @@ paths:
         `device_id`); the call becomes `declined` when no phone is left ringing or on
         the call.
       security: [{ agentKey: [] }, { deviceJwt: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                reason: { type: string, enum: [callee_unavailable] }
       responses:
         "200":
           description: Declined; state `declined`.
@@ -528,6 +541,7 @@ paths:
       summary: Message history, oldest first.
       security: [{ agentKey: [] }, { deviceJwt: [] }]
       parameters:
+        - { name: unread, in: query, description: "When true, filter read_at IS NULL before pagination; false or omitted returns all.", schema: { type: boolean } }
         - { name: chat_id, in: query, schema: { type: string } }
         - name: after
           in: query
@@ -573,13 +587,26 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /v1/messages/{msg_id}/delivered:
+    parameters:
+      - $ref: "#/components/parameters/MsgId"
+    post:
+      tags: [messages]
+      operationId: markMessageDelivered
+      summary: Acknowledge actual receipt of a message from the other party (emits msg.delivered once).
+      security: [{ agentKey: [] }, { deviceJwt: [] }]
+      responses:
+        "204": { description: Marked (idempotent). }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /v1/messages/{msg_id}/read:
     parameters:
       - $ref: "#/components/parameters/MsgId"
     post:
       tags: [messages]
       operationId: markMessageRead
-      summary: Mark a message from the other party as read (emits `msg.read` once).
+      summary: Mark actual reading/consumption by the other party (also proves delivery; emits each receipt once).
       security: [{ agentKey: [] }, { deviceJwt: [] }]
       responses:
         "204": { description: Marked (idempotent). }
@@ -763,7 +790,7 @@ components:
       enum: [ringing, active, ended, missed, declined, canceled]
     EndReason:
       type: string
-      enum: [hangup, canceled, room_closed, error, quota]
+      enum: [hangup, canceled, room_closed, error, quota, callee_unavailable]
 
     Error:
       type: object
@@ -879,10 +906,36 @@ components:
         has_push_token: { type: boolean }
 
     # ---------- calls ----------
+    CallCallee:
+      type: string
+      enum: [claude, codex]
+    CallSessionMode:
+      type: string
+      enum: [new, existing]
+    CallSessionBinding:
+      type: object
+      additionalProperties: false
+      required: [client_session_id, callee, caller]
+      properties:
+        client_session_id: { type: string, minLength: 1, maxLength: 256 }
+        callee: { $ref: "#/components/schemas/CallCallee" }
+        caller:
+          allOf:
+            - $ref: "#/components/schemas/Caller"
+            - type: object
+              required: [provider]
+    AcceptCallRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        session: { $ref: "#/components/schemas/CallSessionBinding" }
     CreateCallRequest:
       type: object
       additionalProperties: false
       properties:
+        client_call_id: { type: string, minLength: 1, maxLength: 64 }
+        callee: { $ref: "#/components/schemas/CallCallee" }
+        session_mode: { $ref: "#/components/schemas/CallSessionMode" }
         chat_id: { type: string, description: Defaults to chat_default. }
         reason:
           description: Required when the agent calls; optional when the user calls.
@@ -910,6 +963,9 @@ components:
       type: object
       required: [call_id, direction, state, priority, agent_name, created_at]
       properties:
+        client_call_id: { type: string, minLength: 1, maxLength: 64 }
+        callee: { $ref: "#/components/schemas/CallCallee" }
+        session_mode: { $ref: "#/components/schemas/CallSessionMode" }
         chat_id: { type: string, description: Defaults to chat_default. }
         chat: { $ref: "#/components/schemas/Chat" }
         call_id: { $ref: "#/components/schemas/CallId" }
@@ -961,6 +1017,7 @@ components:
       additionalProperties: false
       required: [client_session_id]
       properties:
+        callee: { $ref: "#/components/schemas/CallCallee" }
         client_session_id: { type: string, minLength: 1, maxLength: 256 }
         title: { type: string, minLength: 1, maxLength: 256 }
         description: { type: string, maxLength: 1024 }
@@ -969,6 +1026,7 @@ components:
       type: object
       required: [chat_id, client_session_id, title, description, caller, created_at, updated_at]
       properties:
+        callee: { $ref: "#/components/schemas/CallCallee" }
         chat_id: { type: string }
         client_session_id: { type: string }
         title: { type: string }
@@ -985,12 +1043,72 @@ components:
             type: { const: chat.updated }
             chat: { $ref: "#/components/schemas/Chat" }
 
+    QuestionOption:
+      type: object
+      additionalProperties: false
+      required: [id, label]
+      properties:
+        id: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" }
+        label: { type: string, minLength: 1, maxLength: 200 }
+    QuestionRequest:
+      description: Single-choice question. Only agent credentials may originate it. Option IDs must be unique.
+      type: object
+      additionalProperties: false
+      required: [options]
+      properties:
+        options:
+          type: array
+          minItems: 2
+          maxItems: 8
+          items: { $ref: "#/components/schemas/QuestionOption" }
+        allow_free_text: { type: boolean }
+    Question:
+      type: object
+      required: [options]
+      properties:
+        options:
+          type: array
+          minItems: 2
+          maxItems: 8
+          items: { $ref: "#/components/schemas/QuestionOption" }
+        allow_free_text: { type: boolean }
+        answered_by_msg_id: { $ref: "#/components/schemas/MsgId" }
+        answered_at: { $ref: "#/components/schemas/Timestamp" }
+    QuestionAnswer:
+      description: One explicit selected option OR a free-written answer, submitted by a paired device in the question's chat.
+      type: object
+      additionalProperties: false
+      required: [question_id]
+      properties:
+        question_id: { $ref: "#/components/schemas/MsgId" }
+        option_id: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" }
+        free_text: { type: string, minLength: 1, maxLength: 4000 }
+      oneOf:
+        - required: [option_id]
+          not: { required: [free_text] }
+        - required: [free_text]
+          not: { required: [option_id] }
+    QuestionAnsweredEvent:
+      allOf:
+        - $ref: "#/components/schemas/EventBase"
+        - type: object
+          required: [type, chat_id, question_id, answer_msg_id, answered_at]
+          properties:
+            type: { const: question.answered }
+            chat_id: { type: string }
+            question_id: { $ref: "#/components/schemas/MsgId" }
+            answer_msg_id: { $ref: "#/components/schemas/MsgId" }
+            answered_at: { $ref: "#/components/schemas/Timestamp" }
+
     # ---------- messages ----------
     PostMessageRequest:
+      description: Question and answer messages require a nonempty client_msg_id. Question text is the prompt; answer text is derived by the relay.
       type: object
       additionalProperties: false
       required: [text]
       properties:
+        question: { $ref: "#/components/schemas/QuestionRequest" }
+        answer: { $ref: "#/components/schemas/QuestionAnswer" }
         chat_id: { type: string, description: Defaults to chat_default. }
         text: { type: string, maxLength: 4000 }
         attachment_ids:
@@ -1020,6 +1138,8 @@ components:
       type: object
       required: [msg_id, from, text, created_at]
       properties:
+        question: { $ref: "#/components/schemas/Question" }
+        answer: { $ref: "#/components/schemas/QuestionAnswer" }
         chat_id: { type: string, description: Defaults to chat_default. }
         msg_id: { $ref: "#/components/schemas/MsgId" }
         from: { $ref: "#/components/schemas/Party" }
@@ -1033,6 +1153,7 @@ components:
           description: Sending device when `from` = user.
           $ref: "#/components/schemas/DeviceId"
         created_at: { $ref: "#/components/schemas/Timestamp" }
+        delivered_at: { $ref: "#/components/schemas/Timestamp" }
         read_at: { $ref: "#/components/schemas/Timestamp" }
 
     # ---------- events ----------
@@ -1050,6 +1171,8 @@ components:
 
     Event:
       oneOf:
+        - $ref: "#/components/schemas/MsgDeliveredEvent"
+        - $ref: "#/components/schemas/QuestionAnsweredEvent"
         - $ref: "#/components/schemas/ChatUpdatedEvent"
         - $ref: "#/components/schemas/CallInviteEvent"
         - $ref: "#/components/schemas/CallRingingEvent"
@@ -1064,6 +1187,8 @@ components:
       discriminator:
         propertyName: type
         mapping:
+          msg.delivered: "#/components/schemas/MsgDeliveredEvent"
+          question.answered: "#/components/schemas/QuestionAnsweredEvent"
           chat.updated: "#/components/schemas/ChatUpdatedEvent"
           call.invite: "#/components/schemas/CallInviteEvent"
           call.ringing: "#/components/schemas/CallRingingEvent"
@@ -1082,6 +1207,8 @@ components:
         - type: object
           required: [type, call_id, direction, agent_name, reason, priority, expires_at]
           properties:
+            callee: { $ref: "#/components/schemas/CallCallee" }
+            session_mode: { $ref: "#/components/schemas/CallSessionMode" }
             chat_id: { type: string }
             chat: { $ref: "#/components/schemas/Chat" }
             type: { const: call.invite }
@@ -1131,6 +1258,10 @@ components:
         - type: object
           required: [type, call_id, by]
           properties:
+            chat_id: { type: string }
+            chat: { $ref: "#/components/schemas/Chat" }
+            callee: { $ref: "#/components/schemas/CallCallee" }
+            session_mode: { $ref: "#/components/schemas/CallSessionMode" }
             type: { const: call.accept }
             call_id: { $ref: "#/components/schemas/CallId" }
             by: { $ref: "#/components/schemas/Party" }
@@ -1142,6 +1273,7 @@ components:
         - type: object
           required: [type, call_id, by]
           properties:
+            reason: { type: string, enum: [callee_unavailable] }
             type: { const: call.decline }
             call_id: { $ref: "#/components/schemas/CallId" }
             by: { $ref: "#/components/schemas/Party" }
@@ -1174,6 +1306,8 @@ components:
         - type: object
           required: [type, msg_id, from, text]
           properties:
+            question: { $ref: "#/components/schemas/Question" }
+            answer: { $ref: "#/components/schemas/QuestionAnswer" }
             chat_id: { type: string }
             type: { const: msg.new }
             msg_id: { $ref: "#/components/schemas/MsgId" }
@@ -1194,6 +1328,16 @@ components:
         msg_id: msg_01JB0000000000000000000004
         from: agent
         text: "Build finished ✅"
+
+    MsgDeliveredEvent:
+      allOf:
+        - $ref: "#/components/schemas/EventBase"
+        - type: object
+          required: [type, msg_id, by]
+          properties:
+            type: { const: msg.delivered }
+            msg_id: { $ref: "#/components/schemas/MsgId" }
+            by: { $ref: "#/components/schemas/Party" }
 
     MsgReadEvent:
       allOf:

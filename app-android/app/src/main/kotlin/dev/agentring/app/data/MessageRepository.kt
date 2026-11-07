@@ -9,7 +9,6 @@ import dev.agentring.core.ProtocolJson
 import dev.agentring.core.RelayApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.serialization.builtins.ListSerializer
 import java.io.File
 
@@ -25,6 +24,9 @@ class MessageRepository(context: Context) {
     val chats: StateFlow<List<Chat>> = _chats
     private val prefs = context.getSharedPreferences("agentring_state", Context.MODE_PRIVATE)
     private val serializer = ListSerializer(Message.serializer())
+    // Cache loaded from older versions is hydrated before any new acknowledgement.
+    private val complete = mutableSetOf<String>()
+    private val receiptEligible = mutableSetOf<String>()
 
     private val _messages = MutableStateFlow(loadCache())
     val messages: StateFlow<List<Message>> = _messages
@@ -39,30 +41,41 @@ class MessageRepository(context: Context) {
         emptyList()
     }
 
-    private fun persist(list: List<Message>) {
-        try {
+    private fun persist(list: List<Message>): Set<String>? {
+        // Preserve unacknowledged incoming messages even when older than the small history cache.
+        val recent = list.takeLast(MAX_CACHED).mapTo(mutableSetOf()) { it.msgId }
+        val saved = list.filter { it.msgId in recent || it.fromAgent && it.readAt == null }
+        return try {
             val tmp = File(cache.parentFile, cache.name + ".tmp")
-            tmp.writeText(ProtocolJson.encodeToString(serializer, list.takeLast(MAX_CACHED)))
-            tmp.renameTo(cache)
+            java.io.FileOutputStream(tmp).use { output ->
+                output.write(ProtocolJson.encodeToString(serializer, saved).toByteArray(Charsets.UTF_8))
+                output.fd.sync()
+            }
+            check(tmp.renameTo(cache)) { "Cannot replace message cache" }
+            saved.mapTo(mutableSetOf()) { it.msgId }
         } catch (e: Exception) {
             Log.w(TAG, "cannot write message cache", e)
+            null
         }
     }
 
     private fun mutate(block: (List<Message>) -> List<Message>) {
         synchronized(this) {
-            _messages.update { block(it) }
-            persist(_messages.value)
+            val next = block(_messages.value)
+            persist(next)?.let { saved -> receiptEligible.addAll(saved.intersect(complete)) }
+            _messages.value = next
         }
     }
 
     /** Inserts or updates by msg_id. A truncated push never overwrites a full text we already have. */
     fun upsert(m: Message, truncated: Boolean = false) = mutate { list ->
         val existing = list.firstOrNull { it.msgId == m.msgId }
+        if (truncated && existing == null) return@mutate list
+        if (!truncated) complete.add(m.msgId)
         val merged = when {
             existing == null -> m
-            truncated -> existing.copy(readAt = existing.readAt ?: m.readAt)
-            else -> m.copy(readAt = m.readAt ?: existing.readAt)
+            truncated -> existing.copy(readAt = existing.readAt ?: m.readAt, deliveredAt = existing.deliveredAt ?: m.deliveredAt)
+            else -> m.copy(readAt = m.readAt ?: existing.readAt, deliveredAt = m.deliveredAt ?: existing.deliveredAt, question = m.question?.let { it.copy(answeredByMsgId = it.answeredByMsgId ?: existing.question?.answeredByMsgId, answeredAt = it.answeredAt ?: existing.question?.answeredAt) })
         }
         (list.filter { it.msgId != m.msgId } + merged).sortedBy { it.msgId }
     }
@@ -77,8 +90,14 @@ class MessageRepository(context: Context) {
         when (event) {
             is Event.ChatUpdated -> upsertChat(event.chat)
             is Event.MsgNew -> upsert(event.toMessage(), truncated = event.truncated == true)
+            is Event.QuestionAnswered -> mutate { list ->
+                list.map { if (it.msgId == event.questionId && it.chatId == event.chatId) it.copy(question = it.question?.copy(answeredByMsgId = event.answerMsgId, answeredAt = event.answeredAt)) else it }
+            }
+            is Event.MsgDelivered -> mutate { list ->
+                list.map { if (it.msgId == event.msgId && it.from != event.by && it.deliveredAt == null) it.copy(deliveredAt = event.ts) else it }
+            }
             is Event.MsgRead -> mutate { list ->
-                list.map { if (it.msgId == event.msgId && it.readAt == null) it.copy(readAt = event.ts) else it }
+                list.map { if (it.msgId == event.msgId && it.from != event.by && it.readAt == null) it.copy(readAt = event.ts, deliveredAt = it.deliveredAt ?: event.ts) else it }
             }
             else -> Unit
         }
@@ -109,14 +128,21 @@ class MessageRepository(context: Context) {
         }
     }
 
+    /** Acknowledges metadata only after it is stored locally; never downloads attached bytes. */
+    fun markAgentMessagesDelivered(api: RelayApi) {
+        for (m in _messages.value.filter { it.fromAgent && it.deliveredAt == null && synchronized(this) { it.msgId in receiptEligible } }) {
+            try { api.markDelivered(m.msgId); upsert(api.getMessage(m.msgId)) }
+            catch (e: Exception) { Log.w(TAG, "markDelivered failed", e); return }
+        }
+    }
+
     /** Sends read receipts for the agent's messages. Blocking. */
     fun markAgentMessagesRead(api: RelayApi, chatId: String? = null) {
-        val unread = _messages.value.filter { it.fromAgent && it.readAt == null && (chatId == null || it.chatId == chatId) }
-        val now = System.currentTimeMillis()
+        val unread = _messages.value.filter { it.fromAgent && it.readAt == null && synchronized(this) { it.msgId in receiptEligible } && (chatId == null || it.chatId == chatId) }
         for (m in unread) {
             try {
                 api.markRead(m.msgId)
-                mutate { list -> list.map { if (it.msgId == m.msgId) it.copy(readAt = now) else it } }
+                upsert(api.getMessage(m.msgId))
             } catch (e: Exception) {
                 Log.w(TAG, "markRead failed", e)
                 return
@@ -127,6 +153,7 @@ class MessageRepository(context: Context) {
     fun unreadFromAgent(): List<Message> = _messages.value.filter { it.fromAgent && it.readAt == null }
 
     fun clear() = synchronized(this) {
+        complete.clear(); receiptEligible.clear()
         _chats.value = emptyList()
         chatCache.delete()
         _messages.value = emptyList()

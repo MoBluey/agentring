@@ -37,7 +37,7 @@ PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 INSTRUCTIONS = (
     "agentring reaches the user on their phone. Use send_message for anything that can wait and get_replies "
-    "to read their answers (wait_s to wait for one). Use call only when it is urgent or a conversation is "
+    "to fetch their answers (wait_s to wait for one), then acknowledge_replies only after you have read them. Use call only when it is urgent or a conversation is "
     "really needed: the phone rings and a voice AI talks to the user for you, then you get the transcript."
 )
 
@@ -52,7 +52,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "get_replies",
-        "description": ("The user's new replies (each one is returned once). With wait_s, waits up to that many "
+        "description": ("The user's new replies (each returned once; fetching does not acknowledge reading). With wait_s, waits up to that many "
                         "seconds for a reply if there is none yet."),
         "inputSchema": {"type": "object", "properties": {
             "wait_s": {"type": "integer", "minimum": 0, "maximum": 3600,
@@ -82,8 +82,24 @@ TOOLS: list[dict[str, Any]] = [
 
 TOOLS.append({"name": "open_chat", "description": "Create or resume this agent session's chat and bind this MCP connection. Supply verified caller model, provider and project; unknown fields may be omitted.",
               "inputSchema": {"type": "object", "properties": {k: {"type": "string"} for k in
-                              ("session_id", "provider", "model", "project", "title", "description")}, "required": ["session_id"]}})
+                              ("session_id", "provider", "model", "project", "title", "description", "callee")}, "required": ["session_id"]}})
+TOOLS.append({"name": "ask_question", "description": "Send a single-choice question card to this session's phone chat. Use a stable client_msg_id for retries. The user explicitly submits a choice or an optional free-written answer; read it with get_replies.",
+              "inputSchema": {"type": "object", "properties": {
+                  "text": {"type": "string", "minLength": 1, "maxLength": 4000},
+                  "options": {"type": "array", "minItems": 2, "maxItems": 8, "items": {"type": "object", "properties": {
+                      "id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"}, "label": {"type": "string", "minLength": 1, "maxLength": 200}}, "required": ["id", "label"]}},
+                  "allow_free_text": {"type": "boolean", "default": True}, "chat_id": {"type": "string"},
+                  "client_msg_id": {"type": "string", "minLength": 1, "maxLength": 64}},
+              "required": ["text", "options", "client_msg_id"]}})
+
+TOOLS.append({"name": "acknowledge_replies", "description": "Explicitly acknowledge user replies after the originating agent has read them. Fetching/polling or injecting a steer does not mark a reply read. All message IDs must belong to the selected chat; retrying is safe.",
+              "inputSchema": {"type": "object", "properties": {
+                  "msg_ids": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"type": "string"}},
+                  "chat_id": {"type": "string"}}, "required": ["msg_ids"]}})
+
 for tool in TOOLS:
+    if tool["name"] == "open_chat":
+        tool["inputSchema"]["properties"]["callee"] = {"type": "string", "enum": ["claude", "codex"]}
     if tool["name"] in ("send_message", "get_replies", "call"):
         tool["inputSchema"]["properties"]["chat_id"] = {"type": "string", "description": "Override the chat bound by open_chat."}
     if tool["name"] == "send_message":
@@ -185,11 +201,22 @@ class AgentringTools:
         return view
 
     async def open_chat(self, session_id: str, provider: str | None = None, model: str | None = None,
-                        project: str | None = None, title: str | None = None, description: str | None = None) -> dict[str, Any]:
+                        project: str | None = None, title: str | None = None, description: str | None = None,
+                        callee: str | None = None) -> dict[str, Any]:
         chat = await asyncio.to_thread(self.client.open_chat, session_id, provider=provider, model=model,
-                                       project=project, title=title, description=description)
+                                       project=project, title=title, description=description, callee=callee)
         self.chat_binding["chat_id"] = chat["chat_id"]
         return chat
+
+    async def ask_question(self, text: str, options: list[dict[str, str]], client_msg_id: str,
+                           allow_free_text: bool = True, chat_id: str | None = None) -> dict[str, Any]:
+        message = await asyncio.to_thread(self.client.ask_question, text, options, client_msg_id=client_msg_id,
+                                          allow_free_text=allow_free_text, chat_id=chat_id or self.chat_id)
+        await asyncio.to_thread(self._record_sent, message)
+        return message
+
+    async def acknowledge_replies(self, msg_ids: list[str], chat_id: str | None = None) -> dict[str, Any]:
+        return await asyncio.to_thread(self.client.acknowledge_replies, msg_ids, chat_id=chat_id or self.chat_id)
 
     async def send_file(self, path: str, text: str = "", chat_id: str | None = None) -> dict[str, Any]:
         if not self.local_files:
@@ -213,7 +240,8 @@ class AgentringTools:
     def _record_sent(self, m: dict[str, Any]) -> None:
         with self._db:
             self.store.upsert_message(m["msg_id"], "agent", m["text"], m["created_at"], m.get("reply_to"),
-                                      m.get("chat_id", "chat_default"), m.get("attachments", []))
+                                      m.get("chat_id", "chat_default"), m.get("attachments", []),
+                                      m.get("question"), m.get("answer"))
 
     @property
     def busy(self) -> bool:
@@ -239,13 +267,8 @@ class AgentringTools:
             return []  # nobody will get them: leave them for the next get_replies
         if rows:
             self.store.mark_delivered([r["msg_id"] for r in rows], int(time.time() * 1000))
-            for r in rows:
-                if r["read_at"] is None:
-                    try:
-                        self.client.mark_read(r["msg_id"])
-                    except RelayError:
-                        pass  # the read receipt is cosmetic
         return [{"msg_id": r["msg_id"], "text": r["text"], "reply_to": r["reply_to"], "chat_id": r["chat_id"], "attachments": r["attachments"],
+                 **({"answer": r["answer"]} if "answer" in r else {}),
                  "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["created_at"] / 1000))} for r in rows]
 
     async def get_replies(self, wait_s: int = 0, chat_id: str | None = None) -> dict[str, Any]:

@@ -96,8 +96,11 @@ class RelayClient:
 
     # agent session chats and file transfers
     def open_chat(self, session_id: str, *, provider: str | None = None, model: str | None = None,
-                  project: str | None = None, title: str | None = None, description: str | None = None) -> dict:
+                  project: str | None = None, title: str | None = None, description: str | None = None,
+                  callee: str | None = None) -> dict:
         body: dict[str, Any] = {"client_session_id": session_id}
+        if callee is not None:
+            body["callee"] = callee
         caller = {k: v for k, v in {"provider": provider, "model": model, "project": project}.items() if v is not None}
         if caller:
             body["caller"] = caller
@@ -186,8 +189,13 @@ class RelayClient:
 
     # messages
     def post_message(self, text: str, *, reply_to: str | None = None, client_msg_id: str | None = None,
-                     chat_id: str | None = None, attachment_ids: list[str] | None = None) -> dict:
+                     chat_id: str | None = None, attachment_ids: list[str] | None = None,
+                     question: dict | None = None, answer: dict | None = None) -> dict:
         body: dict[str, Any] = {"text": text}
+        if question is not None:
+            body["question"] = question
+        if answer is not None:
+            body["answer"] = answer
         chat_id = chat_id if chat_id is not None else self.chat_id
         if chat_id is not None:
             body["chat_id"] = chat_id
@@ -198,6 +206,35 @@ class RelayClient:
         if client_msg_id:
             body["client_msg_id"] = client_msg_id
         return self._request("POST", "/v1/messages", json=body)
+
+    def ask_question(self, text: str, options: list[dict[str, str]], *, client_msg_id: str,
+                     allow_free_text: bool = True, chat_id: str | None = None) -> dict:
+        return self.post_message(text, client_msg_id=client_msg_id, chat_id=chat_id,
+                                 question={"options": options, "allow_free_text": allow_free_text})
+
+    def mark_received(self, msg_id: str) -> None:
+        self._request("POST", f"/v1/messages/{msg_id}/delivered")
+
+    def acknowledge_replies(self, msg_ids: list[str], *, chat_id: str | None = None) -> dict:
+        active = chat_id or self.chat_id or "chat_default"
+        if not isinstance(msg_ids, list) or not 1 <= len(msg_ids) <= 100 or any(
+            not isinstance(mid, str) or not re.fullmatch(r"msg_[0-9A-HJKMNP-TV-Z]{26}", mid) for mid in msg_ids
+        ):
+            raise RelayError(400, "invalid_request", "Provide 1 to 100 valid message IDs")
+        ids = list(dict.fromkeys(msg_ids))
+        for mid in ids:
+            message = self.get_message(mid)
+            if message["from"] != "user" or message.get("chat_id", "chat_default") != active:
+                raise RelayError(400, "invalid_request", "Only user replies in the selected chat may be acknowledged")
+        for mid in ids:
+            self.mark_read(mid)
+        return {"acknowledged": ids, "chat_id": active}
+
+    def list_unread_replies(self, chat_id: str, *, limit: int = 100) -> list[dict]:
+        """Peek at pending phone input without consuming or acknowledging it."""
+        return self._request("GET", "/v1/messages", params={
+            "from": "user", "chat_id": chat_id, "unread": "true", "limit": limit,
+        })["messages"]
 
     def get_message(self, msg_id: str) -> dict:
         return self._request("GET", f"/v1/messages/{msg_id}")
@@ -214,10 +251,18 @@ class RelayClient:
         agent_name: str | None = None,
         device_ids: list[str] | None = None,
         chat_id: str | None = None,
+        callee: str | None = None,
+        session_mode: str | None = None,
+        client_call_id: str | None = None,
     ) -> dict:
         """Ring every paired phone, or only `device_ids` (a targeted call)."""
+        if session_mode == "new" and chat_id is not None:
+            raise RelayError(400, "invalid_request", "New calls must not select an existing chat")
         body: dict[str, Any] = {"reason": reason, "priority": priority}
-        chat_id = chat_id if chat_id is not None else self.chat_id
+        for key, value in {"callee": callee, "session_mode": session_mode, "client_call_id": client_call_id}.items():
+            if value is not None:
+                body[key] = value
+        chat_id = None if session_mode == "new" else (chat_id if chat_id is not None else self.chat_id)
         if chat_id is not None:
             body["chat_id"] = chat_id
         if agent_name:
@@ -229,8 +274,11 @@ class RelayClient:
     def get_call(self, call_id: str) -> dict:
         return self._request("GET", f"/v1/calls/{call_id}")
 
-    def accept_call(self, call_id: str) -> dict:
-        return self._request("POST", f"/v1/calls/{call_id}/accept")
+    def accept_call(self, call_id: str, *, session: dict | None = None) -> dict:
+        return self._request("POST", f"/v1/calls/{call_id}/accept", **({"json": {"session": session}} if session is not None else {}))
+
+    def decline_call(self, call_id: str, *, reason: str | None = None) -> dict:
+        return self._request("POST", f"/v1/calls/{call_id}/decline", **({"json": {"reason": reason}} if reason else {}))
 
     def end_call(self, call_id: str) -> dict:
         return self._request("POST", f"/v1/calls/{call_id}/end")

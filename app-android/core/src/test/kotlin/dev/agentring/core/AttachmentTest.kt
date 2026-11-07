@@ -80,6 +80,13 @@ class AttachmentTest {
 
     @Test fun `caller context is honest when model was not supplied`() {
         assertTrue(CallerContext(provider = "OpenAI", project = "Orchard").label.contains("Unknown model"))
+        val caller = CallerContext("OpenAI", "verified-model", "Orchard")
+        assertEquals("OpenAI", caller.title("Legacy agent"))
+        assertEquals("Model: verified-model\nProject: Orchard", caller.label)
+        assertEquals("Legacy agent", CallerContext().title("Legacy agent"))
+        assertEquals("Unknown provider", CallerContext().title(""))
+        assertEquals("Model: Unknown model", CallerContext(model = " ").modelLine)
+        assertEquals("Project: Unknown project", CallerContext(project = " ").projectLine)
         val chat = Chat("chat_1", "session_1", "Session", caller = CallerContext("Anthropic", "claude-model", "Orchard"), createdAt = 1, updatedAt = 2)
         val event = Event.parse("""{"type":"chat.updated","id":"evt_2","ts":2,"chat":${ProtocolJson.encodeToString(Chat.serializer(), chat)}}""") as Event.ChatUpdated
         assertEquals("claude-model", event.chat.caller.model)

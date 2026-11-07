@@ -15,7 +15,10 @@ import dev.agentring.app.Graph
 /** Which screen is on top, so a push for a conversation the user is reading doesn't notify. */
 object AppVisibility {
     @Volatile var visibleChatId: String? = null
-    @Volatile var isForeground: Boolean = false
+    val foreground = mutableStateOf(false)
+    var isForeground: Boolean
+        get() = foreground.value
+        set(value) { foreground.value = value }
     val requestedChat = mutableStateOf<String?>(null)
 }
 

@@ -82,15 +82,18 @@ object Notifications {
         val chat = Graph.messages.chats.value.firstOrNull { it.chatId == destinationChatId }
         val unread = groups[destinationChatId].orEmpty().takeLast(6)
         if (unread.isEmpty() && sentReply == null) return
-        val me = Person.Builder().setName(context.getString(R.string.you)).build()
-        val agent = agentPerson(chat?.let { "${it.title} · ${it.caller.label}" } ?: agentName)
-        val style = NotificationCompat.MessagingStyle(me)
-        unread.forEach { style.addMessage(it.text.ifBlank { it.attachments.joinToString { attachment -> attachment.name } }, it.createdAt, agent) }
-        if (sentReply != null) style.addMessage(sentReply, System.currentTimeMillis(), null as Person?)
+        val caller = chat?.caller ?: dev.agentring.core.CallerContext()
+        val title = chat?.displayTitle(agentName) ?: caller.title(agentName)
+        // Keep the latest content within Android's native notification text limit.
+        val latest = if (sentReply != null) "${context.getString(R.string.you)}: $sentReply"
+            else unread.lastOrNull()?.let { it.text.ifBlank { it.attachments.joinToString { attachment -> attachment.name } } }.orEmpty()
+        val body = caller.label + if (latest.isBlank()) "" else "\n\n$latest"
 
         val n = NotificationCompat.Builder(context, CHANNEL_MESSAGES)
             .setSmallIcon(R.drawable.ic_notification)
-            .setStyle(style)
+            .setContentTitle(title)
+            .setContentText(caller.label)
+            .setStyle(NotificationCompat.BigTextStyle().setBigContentTitle(title).bigText(body))
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setContentIntent(openMessagesIntent(context, destinationChatId))
@@ -99,6 +102,27 @@ object Notifications {
             .addAction(replyAction(context, destinationChatId))
             .build()
         NotificationManagerCompat.from(context).notify(destinationChatId, ID_MESSAGES, n)
+    }
+
+    /** A signed partial push can alert without claiming its missing body was received. */
+    @SuppressLint("MissingPermission")
+    fun showPendingMessage(context: Context, agentName: String, chatId: String) {
+        if (!canNotify(context)) return
+        val chat = Graph.messages.chats.value.firstOrNull { it.chatId == chatId }
+        val title = chat?.displayTitle(agentName) ?: "New message"
+        val hint = "Waiting for connection to load the full message. Open this chat to retry."
+        val body = chat?.let { it.caller.label + "\n\n" + hint } ?: hint
+        val notification = NotificationCompat.Builder(context, CHANNEL_MESSAGES)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(title)
+            .setContentText(hint)
+            .setStyle(NotificationCompat.BigTextStyle().setBigContentTitle(title).bigText(body))
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setContentIntent(openMessagesIntent(context, chatId))
+            .setAutoCancel(true)
+            .build()
+        NotificationManagerCompat.from(context).notify(chatId, ID_MESSAGES, notification)
     }
 
     @SuppressLint("MissingPermission")

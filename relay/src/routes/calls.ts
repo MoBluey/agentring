@@ -6,13 +6,16 @@ import { newId } from "../ids.js";
 import type { Event, Schemas } from "../protocol.js";
 import { callMsLeft, checkCall } from "../quota.js";
 
-import { DEFAULT_CHAT, getChat, touchChat } from "./chats.js";
+import { DEFAULT_CHAT, bindCallChat, getChat, pendingCallChat, touchChat } from "./chats.js";
 
 type Call = Schemas["Call"];
 type CallState = Schemas["CallState"];
 type Direction = Schemas["CallDirection"];
 
 interface CallRow {
+  client_call_id: string | null;
+  callee: Schemas["CallCallee"] | null;
+  session_mode: Schemas["CallSessionMode"] | null;
   chat_id: string;
   chat: string | null;
   call_id: string;
@@ -47,7 +50,10 @@ export function canSee(r: Pick<CallRow, "device_ids">, p: Principal): boolean {
 export function callFromRow(r: CallRow): Call {
   return {
     call_id: r.call_id,
+    ...(r.client_call_id ? { client_call_id: r.client_call_id } : {}),
     chat_id: r.chat_id,
+    ...(r.callee ? { callee: r.callee } : {}),
+    ...(r.session_mode ? { session_mode: r.session_mode } : {}),
     ...(r.chat ? { chat: JSON.parse(r.chat) as Schemas["Chat"] } : {}),
     direction: r.direction,
     state: r.state,
@@ -205,15 +211,36 @@ export class Calls {
     } else if (!this.ctx.hub.isAgentOnline()) {
       throw new ApiError(503, "agent_offline", "The agent is not connected");
     }
+    if (body.session_mode === "new" && !body.client_call_id) throw new ApiError(400, "invalid_request", "New session calls require client_call_id");
+    if (body.client_call_id) {
+      if (p.kind !== "device") throw new ApiError(400, "invalid_request", "client_call_id is for incoming user calls");
+      const existing = this.ctx.db.prepare("SELECT * FROM calls WHERE device_id = ? AND client_call_id = ?").get(p.deviceId, body.client_call_id) as unknown as CallRow | undefined;
+      if (existing) {
+        if (existing.session_mode !== (body.session_mode ?? null) || (body.callee && body.callee !== existing.callee) ||
+            (body.session_mode === "existing" && existing.chat_id !== body.chat_id) || (body.session_mode === "new" && body.chat_id !== undefined) ||
+            existing.reason !== (body.reason ?? "") || existing.priority !== (body.priority ?? "normal")) throw new ApiError(409, "idempotency_conflict", "client_call_id was used for another call");
+        if (existing.state !== "ringing" && existing.state !== "active") throw new ApiError(409, "call_ended", `Original call ${existing.call_id} is ${existing.state}`);
+        return existing;
+      }
+    }
     if (this.open()) throw new ApiError(409, "busy", "Another call is ringing or active");
     checkCall(this.ctx.db, this.ctx.limits());
 
-    const chat = getChat(this.ctx, body.chat_id ?? DEFAULT_CHAT);
+    if ((body.callee || body.session_mode) && p.kind !== "device") throw new ApiError(400, "invalid_request", "Session selection is for incoming user calls");
+    if (body.callee && !body.session_mode) throw new ApiError(400, "invalid_request", "callee requires an explicit session_mode");
+    if (body.session_mode === "new" && (!body.callee || body.chat_id !== undefined)) throw new ApiError(400, "invalid_request", "New calls require callee and must not select an existing chat");
+    if (body.session_mode === "existing" && !body.chat_id) throw new ApiError(400, "invalid_request", "Existing calls require chat_id");
+    const callId = newId("call");
+    const chat = body.session_mode === "new" ? pendingCallChat(this.ctx, body.callee!, callId) : getChat(this.ctx, body.chat_id ?? DEFAULT_CHAT);
+    if (body.session_mode === "existing" && (!chat.callee || (body.callee && body.callee !== chat.callee))) throw new ApiError(409, "invalid_state", "The selected chat has no matching call target");
     const now = Date.now();
     const row: CallRow = {
       chat_id: chat.chat_id,
       chat: JSON.stringify(chat),
-      call_id: newId("call"),
+      client_call_id: body.client_call_id ?? null,
+      callee: body.session_mode ? (body.callee ?? chat.callee ?? null) : null,
+      session_mode: body.session_mode ?? null,
+      call_id: callId,
       direction,
       state: "ringing",
       reason: body.reason ?? "",
@@ -230,10 +257,10 @@ export class Calls {
     };
     this.ctx.db
       .prepare(
-        `INSERT INTO calls (call_id, direction, state, reason, priority, agent_name, created_at, expires_at, device_id, device_ids, chat_id, chat)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO calls (call_id, direction, state, reason, priority, agent_name, created_at, expires_at, device_id, device_ids, chat_id, chat, callee, session_mode, client_call_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(row.call_id, direction, "ringing", row.reason, row.priority, row.agent_name, now, row.expires_at, row.device_id, row.device_ids, row.chat_id, row.chat);
+      .run(row.call_id, direction, "ringing", row.reason, row.priority, row.agent_name, now, row.expires_at, row.device_id, row.device_ids, row.chat_id, row.chat, row.callee, row.session_mode, row.client_call_id);
     if (direction === "agent_to_user") {
       const devs =
         targets ??
@@ -247,6 +274,8 @@ export class Calls {
     touchChat(this.ctx, chat.chat_id);
     this.ctx.events.emit({
       type: "call.invite",
+      ...(row.callee ? { callee: row.callee } : {}),
+      ...(row.session_mode ? { session_mode: row.session_mode } : {}),
       chat_id: chat.chat_id,
       chat,
       call_id: row.call_id,
@@ -294,8 +323,24 @@ export class Calls {
    * `expires_at`), and a phone that already joined may rejoin (new token) while
    * the call is active. The first answer moves the call to `active`.
    */
-  accept(callId: string, p: Principal): CallRow {
-    const c = this.mustBeCallee(callId, p);
+  accept(callId: string, p: Principal, binding?: Schemas["CallSessionBinding"]): CallRow {
+    let c = this.mustBeCallee(callId, p);
+    if (c.session_mode) {
+      if (!binding || binding.callee !== c.callee || !binding.client_session_id || binding.client_session_id.startsWith("pending:") || !binding.caller.provider) throw new ApiError(400, "invalid_request", "A real matching provider session binding is required");
+      const chat = getChat(this.ctx, c.chat_id);
+      if (chat.callee !== binding.callee) throw new ApiError(409, "invalid_state", "Chat call target changed before acceptance");
+      if (c.state === "active") {
+        if (chat.client_session_id !== binding.client_session_id || Object.keys(binding.caller).some(key => chat.caller[key as keyof typeof chat.caller] !== binding.caller[key as keyof typeof binding.caller])) throw new ApiError(409, "idempotency_conflict", "Call was accepted with another session binding");
+        return c;
+      }
+      if (c.state !== "ringing") throw invalidState(c.state);
+      if (Date.now() > c.expires_at) throw new ApiError(409, "call_ended", "Call expired before acceptance");
+      if (c.session_mode === "existing" && chat.client_session_id !== binding.client_session_id) throw new ApiError(409, "invalid_state", "Existing calls must retain their selected provider session");
+      if (c.session_mode === "new" && chat.client_session_id !== `pending:${callId}` && chat.client_session_id !== binding.client_session_id) throw new ApiError(409, "invalid_state", "New call is already bound to another provider session");
+      const bound = bindCallChat(this.ctx, c.chat_id, binding);
+      this.ctx.db.prepare("UPDATE calls SET chat = ? WHERE call_id = ?").run(JSON.stringify(bound), callId);
+      c = this.get(callId)!;
+    } else if (binding) throw new ApiError(400, "invalid_request", "Legacy calls do not accept session rebinding");
     const now = Date.now();
     if (p.kind === "device") {
       const prev = this.part(callId, p.deviceId);
@@ -310,7 +355,7 @@ export class Calls {
     if (res.changes !== 1) throw invalidState(this.get(callId)!.state);
     this.settle(callId);
     this.armQuota(callId);
-    this.ctx.events.emit({ type: "call.accept", call_id: callId, by: "agent" });
+    this.ctx.events.emit({ type: "call.accept", call_id: callId, by: "agent", ...(c.session_mode ? { session_mode: c.session_mode, callee: c.callee!, chat_id: c.chat_id, chat: getChat(this.ctx, c.chat_id) } : {}) });
     return this.get(callId)!;
   }
 
@@ -353,8 +398,9 @@ export class Calls {
    * Decline. A phone declining only stops its own ringing; the call becomes
    * `declined` when no phone is left ringing or on the call.
    */
-  decline(callId: string, p: Principal): CallRow {
+  decline(callId: string, p: Principal, reason?: "callee_unavailable"): CallRow {
     const c = this.mustBeCallee(callId, p);
+    if (reason && p.kind !== "agent") throw forbidden("Only the receiving agent may report an unavailable backend");
     const by = p.kind === "agent" ? "agent" : "user";
     if (p.kind === "device") {
       if (this.part(callId, p.deviceId) !== "ringing" || (c.state !== "ringing" && c.state !== "active")) {
@@ -372,11 +418,11 @@ export class Calls {
       return this.get(callId)!;
     }
     const res = this.ctx.db
-      .prepare("UPDATE calls SET state = 'declined', ended_at = ?, ended_by = ? WHERE call_id = ? AND state = 'ringing'")
-      .run(Date.now(), by, callId);
+      .prepare("UPDATE calls SET state = 'declined', ended_at = ?, ended_by = ?, end_reason = ? WHERE call_id = ? AND state = 'ringing'")
+      .run(Date.now(), by, reason ?? null, callId);
     if (res.changes !== 1) throw invalidState(this.get(callId)!.state);
     this.settle(callId);
-    this.ctx.events.emit({ type: "call.decline", call_id: callId, by });
+    this.ctx.events.emit({ type: "call.decline", call_id: callId, by, ...(reason ? { reason } : {}) });
     this.closeRoom(callId);
     return this.get(callId)!;
   }
@@ -538,6 +584,9 @@ export function callRoutes(app: FastifyInstance, ctx: Ctx, calls: Calls): void {
           type: "object",
           additionalProperties: false,
           properties: {
+            client_call_id: { type: "string", minLength: 1, maxLength: 64 },
+            callee: { type: "string", enum: ["claude", "codex"] },
+            session_mode: { type: "string", enum: ["new", "existing"] },
             chat_id: { type: "string", maxLength: 64 },
             reason: { type: "string", maxLength: 500 },
             priority: { type: "string", enum: ["normal", "urgent"] },
@@ -615,13 +664,20 @@ export function callRoutes(app: FastifyInstance, ctx: Ctx, calls: Calls): void {
     },
   );
 
-  app.post<{ Params: { call_id: string } }>(
+  app.post<{ Params: { call_id: string }; Body: Schemas["AcceptCallRequest"] | undefined }>(
     "/v1/calls/:call_id/accept",
-    { preHandler: auth, schema: { params: CALL_ID } },
+    { preHandler: auth, preValidation: async req => { req.body ??= {}; }, schema: { params: CALL_ID, body: { type: "object", additionalProperties: false, properties: {
+      session: { type: "object", additionalProperties: false, required: ["client_session_id", "callee", "caller"], properties: {
+        client_session_id: { type: "string", minLength: 1, maxLength: 256 }, callee: { type: "string", enum: ["claude", "codex"] },
+        caller: { type: "object", additionalProperties: false, required: ["provider"], properties: {
+          provider: { type: "string", minLength: 1, maxLength: 64 }, model: { type: "string", minLength: 1, maxLength: 128 }, project: { type: "string", minLength: 1, maxLength: 256 },
+        } },
+      } },
+    } } } },
     async (req) => {
       const p = principal(req);
       livekit();
-      const row = calls.accept(req.params.call_id, p);
+      const row = calls.accept(req.params.call_id, p, req.body?.session);
       return { call: callFromRow(row), join: await joinFor(row.call_id, p) };
     },
   );
@@ -638,10 +694,12 @@ export function callRoutes(app: FastifyInstance, ctx: Ctx, calls: Calls): void {
     },
   );
 
-  app.post<{ Params: { call_id: string } }>(
+  app.post<{ Params: { call_id: string }; Body: { reason?: "callee_unavailable" } | undefined }>(
     "/v1/calls/:call_id/decline",
-    { preHandler: auth, schema: { params: CALL_ID } },
-    async (req) => callFromRow(calls.decline(req.params.call_id, principal(req))),
+    { preHandler: auth, preValidation: async req => { req.body ??= {}; }, schema: { params: CALL_ID, body: {
+      type: "object", additionalProperties: false, properties: { reason: { type: "string", enum: ["callee_unavailable"] } },
+    } } },
+    async (req) => callFromRow(calls.decline(req.params.call_id, principal(req), req.body?.reason)),
   );
 
   app.post<{ Params: { call_id: string } }>(

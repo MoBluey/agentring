@@ -93,3 +93,13 @@ it("keeps Unicode attachment and caller metadata under the signed push budget", 
   expect(Buffer.byteLength(invite.event)).toBeLessThanOrEqual(3000);
   expect(JSON.parse(invite.event).chat.caller.model).toBe("😀".repeat(128));
 });
+
+it("fetches full questions instead of exceeding the signed push budget", () => {
+  const question = { options: Array.from({ length: 8 }, (_, index) => ({ id: `option_${index}`, label: "😀".repeat(200) })), allow_free_text: true };
+  const event = { type: "msg.new" as const, id: "evt_a", seq: 1, ts: 1, msg_id: "msg_a", from: "agent" as const, text: "Question", question };
+  const pushed = buildPayload("relay", Buffer.alloc(32).toString("base64url"), event);
+  expect(Buffer.byteLength(pushed.event)).toBeLessThanOrEqual(3000);
+  expect(JSON.parse(pushed.event).truncated).toBe(true);
+  expect(JSON.parse(pushed.event).question).toBeUndefined();
+  expect(event.question).toEqual(question);
+});

@@ -12,13 +12,25 @@ and Grok use it to transcribe the user; Gemini follows the instructions).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
 from ..config import secret
 
 DEFAULT_PROVIDER = "gemini"
+
+
+@dataclass
+class PreparedCall:
+    """A real host conversation prepared for one explicit inbound call.
+
+    Provider adapters key durable creation/reuse by call["call_id"]. The backend
+    factory must be bound to that exact conversation, rather than a global session.
+    """
+    session: dict[str, Any]
+    backend: Callable[[], Any]
+    close: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)

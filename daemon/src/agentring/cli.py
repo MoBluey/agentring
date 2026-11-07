@@ -76,7 +76,8 @@ def _agents_config(path: str | None, *, required: bool = False) -> Any:
 
 
 async def _build_ai(instructions: str | None, mcp: list[str] | None, tools: str | None, model: str | None,
-                    voice: str | None, agents_file: str | None = None, provider: str | None = None) -> Any:
+                    voice: str | None, agents_file: str | None = None, provider: str | None = None,
+                    *, call: dict | None = None, relay: Any = None) -> Any:
     try:
         from .voice.quick import build_agent
     except ImportError:
@@ -86,12 +87,14 @@ async def _build_ai(instructions: str | None, mcp: list[str] | None, tools: str 
     try:
         choice = resolve_voice(provider, model, voice)
     except VoiceConfigError as e:
+        if call is not None:
+            raise
         raise _fail(f"--ai: {e}") from None
     logging.getLogger("agentring").info("voice AI: %s (%s)", choice.provider.label, choice.model)
     allow = [t.strip() for t in tools.split(",") if t.strip()] if tools else None
     agents = _agents_config(agents_file)
     try:
-        return await build_agent(choice, instructions=instructions, mcp=mcp, allow=allow, agents=agents)
+        return await build_agent(choice, instructions=instructions, mcp=mcp, allow=allow, agents=agents, call=call, relay=relay)
     except OSError as e:
         raise _fail(f"cannot read the instructions: {e}") from None
 
@@ -173,6 +176,7 @@ def chats_create(
     project: Annotated[Optional[str], typer.Option("--project")] = None,
     title: Annotated[Optional[str], typer.Option("--title")] = None,
     description: Annotated[Optional[str], typer.Option("--description")] = None,
+    callee: Annotated[Optional[str], typer.Option("--callee", help="Existing-session call target: claude or codex.")] = None,
     json_out: JsonOpt = False,
 ) -> None:
     """Create or update one session's chat. Reusing --session resumes it."""
@@ -182,7 +186,7 @@ def chats_create(
         raise _fail("Provide --session or AGENTRING_SESSION_ID")
     with _client(_settings()) as client:
         try:
-            chat = client.open_chat(session_id, provider=provider, model=model, project=project, title=title, description=description)
+            chat = client.open_chat(session_id, provider=provider, model=model, project=project, title=title, description=description, callee=callee)
         except RelayError as e:
             raise _fail(str(e)) from None
     _emit_json(chat) if json_out else typer.echo(chat["chat_id"])
@@ -200,6 +204,46 @@ def chats_list(json_out: JsonOpt = False) -> None:
     else:
         for chat in chats:
             typer.echo(f"{chat['chat_id']}  {chat['title']}")
+
+
+
+@app.command("acknowledge-replies")
+def acknowledge_replies(
+    msg_ids: Annotated[list[str], typer.Argument(help="User reply IDs explicitly acknowledged by the originating agent.")],
+    chat: ChatOpt = None,
+    json_out: JsonOpt = False,
+) -> None:
+    """Mark replies read after explicit acknowledgement, not merely fetching or steering."""
+    with _client(_settings(), chat) as client:
+        try:
+            result = client.acknowledge_replies(msg_ids)
+        except RelayError as e:
+            raise _fail(str(e)) from None
+    _emit_json(result) if json_out else typer.echo("Acknowledged " + ", ".join(result["acknowledged"]))
+
+
+@app.command("ask-question")
+def ask_question(
+    text: Annotated[str, typer.Argument(help="Question prompt; raw Markdown is preserved.")],
+    option: Annotated[list[str], typer.Option("--option", help="Stable id=label, repeated 2 to 8 times.")],
+    client_msg_id: Annotated[str, typer.Option("--client-msg-id", help="Stable request key; reuse for retries.")],
+    allow_free_text: Annotated[bool, typer.Option("--allow-free-text/--no-free-text", help="Allow a free-written answer instead of a choice (default enabled).")] = True,
+    chat: ChatOpt = None,
+    json_out: JsonOpt = False,
+) -> None:
+    """Ask the user to submit one answer in the selected session chat."""
+    options = []
+    for item in option:
+        key, sep, label = item.partition("=")
+        if not sep or not key or not label:
+            raise _fail("Each --option must be id=label")
+        options.append({"id": key, "label": label})
+    with _client(_settings(), chat) as client:
+        try:
+            message = client.ask_question(text, options, client_msg_id=client_msg_id, allow_free_text=allow_free_text)
+        except RelayError as e:
+            raise _fail(str(e)) from None
+    _emit_json(message) if json_out else typer.echo(message["msg_id"])
 
 
 @app.command("send-file")
@@ -492,7 +536,7 @@ def replies(
     chat: ChatOpt = None,
     json_out: JsonOpt = False,
 ) -> None:
-    """Show the user's replies. By default only new ones (not shown before), which are then marked as seen."""
+    """Fetch new user replies once. Use acknowledge-replies after reading to send a read receipt."""
     s = _settings()
     store = Store(s.db_path)
     with _client(s) as c:
@@ -506,17 +550,12 @@ def replies(
         rows = store.replies(since=since_ms, undelivered_only=undelivered_only, limit=limit, chat_id=chat or "chat_default")
         if rows and not peek:
             store.mark_delivered([r["msg_id"] for r in rows], _now_ms())
-            for r in rows:
-                if r["read_at"] is None:
-                    try:
-                        c.mark_read(r["msg_id"])
-                    except RelayError:
-                        pass  # best effort; the read receipt is cosmetic
     store.close()
 
     out = [
         {"msg_id": r["msg_id"], "text": r["text"], "created_at": r["created_at"], "reply_to": r["reply_to"],
-         "chat_id": r["chat_id"], "attachments": r["attachments"]}
+         "chat_id": r["chat_id"], "attachments": r["attachments"],
+         **({"answer": r["answer"]} if "answer" in r else {})}
         for r in rows
     ]
     if json_out:
@@ -749,6 +788,7 @@ def _describe(event: dict[str, Any]) -> str | None:
 def serve(
     ai: Annotated[bool, typer.Option("--ai", help="Answer calls from the phone with a voice AI (see --provider).")] = False,
     provider: ProviderOpt = None,
+    call_provider: Annotated[Optional[list[str]], typer.Option("--call-provider", help="Allowed callee=registered-provider mapping; repeat for claude and codex.")] = None,
     instructions: InstructionsOpt = None,
     mcp: McpOpt = None,
     tools: ToolsOpt = None,
@@ -757,6 +797,12 @@ def serve(
     agents_file: AgentsFileOpt = None,
 ) -> None:
     """Run the daemon: keeps a live connection to the relay. With --ai, answers the phone's calls with a voice AI."""
+    routes: dict[str, str] = {}
+    for entry in call_provider or []:
+        callee, sep, selected = entry.partition("=")
+        if not ai or not sep or callee not in ("claude", "codex") or not selected or callee in routes:
+            raise _fail("--call-provider requires --ai and unique claude=provider / codex=provider entries")
+        routes[callee] = selected
     s = _settings()
     store = Store(s.db_path)
     client = _client(s)
@@ -764,12 +810,25 @@ def serve(
 
     calls: set[asyncio.Task] = set()
     voice_agent: Any = None
+    call_tasks: dict[str, asyncio.Task] = {}
 
     async def answer(e: dict[str, Any], stop: asyncio.Event) -> None:
         from .voice import accept_incoming
 
         if calls - {asyncio.current_task()}:
             log.info("already on a call; not answering %s", e["call_id"])
+            return
+        if e.get("session_mode"):
+            from .voice.inbound import run_prepared_incoming
+            from .voice.providers import VoiceConfigError
+
+            async def selected(call: dict, relay: Any) -> Any:
+                selected_provider = routes.get(call.get("callee"))
+                if not selected_provider:
+                    raise VoiceConfigError("Requested callee is not configured")
+                return await _build_ai(instructions, mcp, tools, None, None, agents_file, selected_provider,
+                                       call=call, relay=relay)
+            await run_prepared_incoming(client, e, selected, stop=stop)
             return
         accepted = await asyncio.to_thread(accept_incoming, client, e)
         if not accepted:
@@ -784,28 +843,52 @@ def serve(
         d = _describe(e)
         if d:
             log.info(d)
+        if e.get("type") in ("call.end", "call.missed", "call.decline"):
+            pending = call_tasks.pop(e.get("call_id", ""), None)
+            if pending is not None:
+                pending.cancel()
         if voice_agent is not None and stop is not None and e.get("type") == "call.invite":
             from .voice import is_incoming_call
 
-            if is_incoming_call(e):
+            if is_incoming_call(e) and e["call_id"] not in call_tasks:
                 t = asyncio.get_running_loop().create_task(answer(e, stop))
                 calls.add(t)
+                call_tasks[e["call_id"]] = t
                 t.add_done_callback(calls.discard)
+                t.add_done_callback(lambda done, cid=e["call_id"]: call_tasks.pop(cid, None) if call_tasks.get(cid) is done else None)
 
     async def main() -> None:
         nonlocal voice_agent
         stop = asyncio.Event()
         _signals(stop)
         built: Any = None
+        reply_task: asyncio.Task | None = None
         if ai:
             built = await _build_ai(instructions, mcp, tools, model, voice, agents_file, provider)
             voice_agent = built.agent
             log.info("answering calls with %d tools", len(voice_agent.tools))
         log.info("agentring %s serving; relay %s", __version__, s.relay_url)
+        if routes:
+            from .reply_router import run_reply_router
+            from .voice.providers import VoiceConfigError, resolve_voice
+
+            choices = {}
+            for callee, selected_provider in routes.items():
+                try:
+                    choices[callee] = resolve_voice(selected_provider)
+                except VoiceConfigError as error:
+                    log.warning("callee %s replies unavailable: %s", callee, error)
+            reply_task = asyncio.create_task(run_reply_router(client, store, choices, stop))
         try:
             await run_ws(client, s.api_key, store, lambda e: on_event(e, stop), stop=stop)
             await asyncio.gather(*calls, return_exceptions=True)
         finally:
+            if reply_task is not None:
+                reply_task.cancel()
+                await asyncio.gather(reply_task, return_exceptions=True)
+            for pending in tuple(calls):
+                pending.cancel()
+            await asyncio.gather(*calls, return_exceptions=True)
             if built is not None:
                 await built.aclose()
 

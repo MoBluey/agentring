@@ -46,8 +46,9 @@ an agent session call:
 
 Then `send_message`, `send_file`, `get_replies`, and `call` use that connection's
 active chat. Each also accepts an explicit `chat_id` override. `get_replies`
-filters by chat before marking replies delivered or read. It never consumes
-another chat's unread replies. Received replies include `chat_id` and full
+filters by chat before returning each reply once. Fetching does not mark replies
+read; call `acknowledge_replies` after the originating agent acknowledges them.
+It never consumes another chat's replies. Received replies include `chat_id` and full
 `attachments` metadata, even when the message has no text.
 
 Local file tools:
@@ -148,3 +149,6 @@ Rollback requires stopping the new processes and restoring the pre-rollout data
 backup alongside the old code. Preserve the current data directory separately
 first: restoring the backup omits chats, messages and files created after it.
 Do not delete migration rows or drop columns to force old code onto a changed DB.
+
+Structured choices, raw Markdown and delivery/read semantics are described in
+[questions.md](questions.md). That addition has its own migration and rollout approval.

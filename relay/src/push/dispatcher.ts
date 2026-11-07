@@ -34,7 +34,7 @@ export function buildPayload(relayId: string, pushSecret: string, event: Event):
   }
   if (event.type === "msg.new") {
     // Large metadata is fetched over authenticated REST using the message ID.
-    if (Buffer.byteLength(json) > MAX_EVENT_BYTES) json = JSON.stringify({ ...event, attachments: [], truncated: true });
+    if (Buffer.byteLength(json) > MAX_EVENT_BYTES) json = JSON.stringify({ ...event, attachments: [], question: undefined, answer: undefined, truncated: true });
     const pushEvent = JSON.parse(json) as Event;
     let text = event.text;
     while (Buffer.byteLength(json) > MAX_EVENT_BYTES && text.length > 0) {

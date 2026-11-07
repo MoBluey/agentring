@@ -47,6 +47,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.agentring.app.Graph
@@ -78,9 +79,9 @@ fun MessagesScreen(pairing: Pairing) {
                 items(chats, key = { it.chatId }) { item ->
                     Surface(onClick = { selected = item.chatId }, modifier = Modifier.fillMaxWidth().testTag("chat_${item.chatId}")) {
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(item.title, style = MaterialTheme.typography.titleMedium)
-                            Text(item.caller.label, style = MaterialTheme.typography.bodySmall)
-                            if (item.description.isNotBlank()) Text(item.description, style = MaterialTheme.typography.bodySmall)
+                            Text(item.displayTitle(pairing.agentName), style = MaterialTheme.typography.titleMedium)
+                            Text(item.caller.modelLine, style = MaterialTheme.typography.bodySmall)
+                            Text(item.caller.projectLine, style = MaterialTheme.typography.bodySmall)
                             val latest = allMessages.lastOrNull { it.chatId == item.chatId }
                             latest?.let { Text(it.text.ifBlank { it.attachments.firstOrNull()?.name ?: "Attachment" }, maxLines = 1, style = MaterialTheme.typography.bodyMedium) }
                         }
@@ -98,7 +99,7 @@ private fun ConversationScreen(pairing: Pairing, chat: Chat, onBack: () -> Unit)
     val scope = rememberCoroutineScope()
     val allMessages by Graph.messages.messages.collectAsStateWithLifecycle()
     val messages = allMessages.filter { it.chatId == chat.chatId }
-    var input by rememberSaveable { mutableStateOf("") }
+    var input by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue()) }
     var sending by remember { mutableStateOf(false) }
     var sendError by remember { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
@@ -126,16 +127,20 @@ private fun ConversationScreen(pairing: Pairing, chat: Chat, onBack: () -> Unit)
         onDispose { AppVisibility.visibleChatId = null }
     }
     LaunchedEffect(chat.chatId) {
-        withContext(Dispatchers.IO) { Graph.api()?.let { runCatching { Graph.messages.refreshChat(it, chat.chatId) } } }
+        withContext(Dispatchers.IO) { Graph.api()?.let { api -> runCatching {
+            Graph.messages.refreshChat(api, chat.chatId)
+            if (AppVisibility.isForeground && AppVisibility.visibleChatId == chat.chatId) Graph.messages.markAgentMessagesRead(api, chat.chatId)
+        } } }
     }
     // Opening the thread (or a new message arriving while it's open) marks the agent's messages read.
-    LaunchedEffect(messages.size) {
+    LaunchedEffect(messages.size, AppVisibility.foreground.value) {
+        if (!AppVisibility.isForeground) return@LaunchedEffect
         Notifications.cancelMessages(ctx, chat.chatId)
         if (messages.any { it.fromAgent && it.readAt == null }) {
             withContext(Dispatchers.IO) { Graph.api()?.let { runCatching { Graph.messages.markAgentMessagesRead(it, chat.chatId) } } }
         }
-        if (messages.isNotEmpty()) listState.animateScrollToItem(0)
     }
+    LaunchedEffect(messages.size) { if (messages.isNotEmpty()) listState.animateScrollToItem(0) }
 
     Column(Modifier.fillMaxSize().imePadding()) {
         Row(
@@ -146,9 +151,13 @@ private fun ConversationScreen(pairing: Pairing, chat: Chat, onBack: () -> Unit)
             val online by Graph.connection.agentOnline.collectAsStateWithLifecycle()
             TextButton(onClick = onBack, modifier = Modifier.testTag("back_chats")) { Text("Back") }
             Column(Modifier.weight(1f)) {
-                Text(chat.title, style = MaterialTheme.typography.titleMedium)
-                Text(chat.caller.label, style = MaterialTheme.typography.bodySmall)
+                Text(chat.displayTitle(pairing.agentName), style = MaterialTheme.typography.titleMedium, modifier = Modifier.testTag("chat_provider"))
+                Text(chat.caller.modelLine, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("chat_model"))
+                Text(chat.caller.projectLine, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("chat_project"))
             }
+            val relay by Graph.connection.relayState.collectAsStateWithLifecycle()
+            val revoked by Graph.pairing.revoked.collectAsStateWithLifecycle()
+            CallAgentButton(pairing, relay == dev.agentring.core.RelaySocket.State.CONNECTED, online == true, revoked, chatId = chat.chatId, compact = true)
         }
         androidx.compose.material3.HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         if (messages.isEmpty()) {
@@ -171,7 +180,6 @@ private fun ConversationScreen(pairing: Pairing, chat: Chat, onBack: () -> Unit)
                 )
             }
         } else {
-            val lastReadByAgent = messages.lastOrNull { !it.fromAgent && it.readAt != null }?.msgId
             LazyColumn(
                 state = listState,
                 reverseLayout = true,
@@ -180,7 +188,7 @@ private fun ConversationScreen(pairing: Pairing, chat: Chat, onBack: () -> Unit)
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
             ) {
                 items(messages.asReversed(), key = { it.msgId }) { m ->
-                    Bubble(m, showRead = m.msgId == lastReadByAgent)
+                    Bubble(m)
                 }
             }
         }
@@ -203,6 +211,7 @@ private fun ConversationScreen(pairing: Pairing, chat: Chat, onBack: () -> Unit)
                 } else TextButton(onClick = { selected?.file?.delete(); selected = null; uploaded = null }) { Text("Remove attachment") }
             }
         }
+        FormattingToolbar(input, enabled = !sending && !preparing) { input = formattedComposer(input, it) }
         Row(
             Modifier.fillMaxWidth().padding(12.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -212,16 +221,16 @@ private fun ConversationScreen(pairing: Pairing, chat: Chat, onBack: () -> Unit)
             OutlinedTextField(
                 value = input,
                 enabled = !sending && !preparing,
-                onValueChange = { input = it },
-                placeholder = { Text(stringResource(R.string.message_hint, pairing.agentName)) },
+                onValueChange = { input = editedComposer(input, it) },
+                placeholder = { Text(stringResource(R.string.message_hint, chat.displayTitle(pairing.agentName))) },
                 maxLines = 5,
                 shape = RoundedCornerShape(24.dp),
                 modifier = Modifier.weight(1f).testTag("message_input"),
             )
             FilledIconButton(
                 onClick = {
-                    val text = input.trim()
-                    if (text.isEmpty() && selected == null || sending || preparing) return@FilledIconButton
+                    val text = composerMessage(input)
+                    if (text.isBlank() && selected == null || sending || preparing) return@FilledIconButton
                     val attempt = sendAttempt.forPayload(text, selected?.file?.name)
                     if (attempt.payloadChanged) uploaded = null
                     scope.launch {
@@ -239,7 +248,7 @@ private fun ConversationScreen(pairing: Pairing, chat: Chat, onBack: () -> Unit)
                                 api.postMessage(text, clientMsgId = attempt.clientMsgId, attachmentIds = listOfNotNull(uploaded?.attachmentId), chatId = chat.chatId)
                             }
                             Graph.messages.upsert(m)
-                            input = ""
+                            input = TextFieldValue()
                             selected?.file?.delete(); selected = null; uploaded = null; sendAttempt.reset()
                         } catch (e: Exception) {
                             sendError = e.message ?: e.javaClass.simpleName
@@ -249,7 +258,7 @@ private fun ConversationScreen(pairing: Pairing, chat: Chat, onBack: () -> Unit)
                         }
                     }
                 },
-                enabled = (input.isNotBlank() || selected != null) && !sending && !preparing,
+                enabled = (input.text.isNotBlank() || selected != null) && !sending && !preparing,
                 modifier = Modifier.size(52.dp).testTag("send_button"),
             ) {
                 if (sending) {
@@ -263,7 +272,7 @@ private fun ConversationScreen(pairing: Pairing, chat: Chat, onBack: () -> Unit)
 }
 
 @Composable
-private fun Bubble(m: Message, showRead: Boolean) {
+private fun Bubble(m: Message) {
     val mine = !m.fromAgent
     Column(
         Modifier.fillMaxWidth(),
@@ -280,16 +289,18 @@ private fun Bubble(m: Message, showRead: Boolean) {
             modifier = Modifier.widthIn(max = 300.dp),
         ) {
             Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (m.text.isNotBlank()) Text(m.text, style = MaterialTheme.typography.bodyLarge)
+                if (m.text.isNotBlank()) RichMessageBody(m.text, m.msgId)
                 m.attachments.forEach { AttachmentCard(it) }
+                m.question?.let { QuestionCard(m, it) }
             }
         }
-        val time = DateUtils.getRelativeTimeSpanString(m.createdAt, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS).toString()
+        val time = DateUtils.formatDateTime(LocalContext.current, m.createdAt,
+            DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME or DateUtils.FORMAT_SHOW_YEAR)
         Text(
-            if (showRead) "$time · ${stringResource(R.string.read)}" else time,
+            "$time · " + when { m.readAt != null -> "✓✓ Read"; m.deliveredAt != null -> "✓✓ Delivered"; else -> "✓ Sent" },
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp).testTag("timestamp_${m.msgId}"),
         )
     }
 }

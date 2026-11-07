@@ -108,6 +108,18 @@ const MIGRATIONS: string[] = [
   DROP INDEX messages_client_id;
   CREATE UNIQUE INDEX messages_client_id ON messages(sender, chat_id, COALESCE(device_id, ''), client_msg_id) WHERE client_msg_id IS NOT NULL;
   `,
+  `
+  ALTER TABLE messages ADD COLUMN question_json TEXT;
+  ALTER TABLE messages ADD COLUMN answer_json TEXT;
+  ALTER TABLE messages ADD COLUMN answer_to TEXT REFERENCES messages(msg_id);
+  ALTER TABLE messages ADD COLUMN delivered_at INTEGER;
+  ALTER TABLE calls ADD COLUMN client_call_id TEXT;
+  CREATE UNIQUE INDEX calls_client_id ON calls(device_id, client_call_id) WHERE client_call_id IS NOT NULL;
+  ALTER TABLE calls ADD COLUMN callee TEXT;
+  ALTER TABLE calls ADD COLUMN session_mode TEXT;
+  ALTER TABLE chats ADD COLUMN callee TEXT;
+  CREATE UNIQUE INDEX messages_question_answer ON messages(answer_to) WHERE answer_to IS NOT NULL;
+  `,
 ];
 
 export type Db = DatabaseSync;

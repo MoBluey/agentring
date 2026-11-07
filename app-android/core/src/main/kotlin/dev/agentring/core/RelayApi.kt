@@ -41,6 +41,7 @@ class RelayApi(
     @Serializable
     private data class PostMessageBody(
         val text: String,
+        val answer: QuestionAnswer? = null,
         @SerialName("reply_to") val replyTo: String? = null,
         @SerialName("client_msg_id") val clientMsgId: String? = null,
         @SerialName("attachment_ids") val attachmentIds: List<String>? = null,
@@ -48,7 +49,11 @@ class RelayApi(
     )
 
     @Serializable
-    private data class CreateCallBody(val reason: String? = null, @SerialName("chat_id") val chatId: String? = null)
+    private data class CreateCallBody(
+        val reason: String? = null, @SerialName("chat_id") val chatId: String? = null,
+        val callee: String? = null, @SerialName("session_mode") val sessionMode: String? = null,
+        @SerialName("client_call_id") val clientCallId: String? = null,
+    )
 
     fun pair(req: PairRequest): PairResponse =
         call("POST", "/v1/pair", body(PairRequest.serializer(), req), PairResponse.serializer(), auth = false)
@@ -74,12 +79,16 @@ class RelayApi(
 
     fun getMessage(msgId: String): Message = call("GET", "/v1/messages/$msgId", null, Message.serializer())
 
-    fun postMessage(text: String, replyTo: String? = null, clientMsgId: String? = null, attachmentIds: List<String> = emptyList(), chatId: String? = null): Message =
+    fun postMessage(text: String, replyTo: String? = null, clientMsgId: String? = null, attachmentIds: List<String> = emptyList(), chatId: String? = null, answer: QuestionAnswer? = null): Message =
         call(
             "POST", "/v1/messages",
-            body(PostMessageBody.serializer(), PostMessageBody(text, replyTo, clientMsgId, attachmentIds.takeIf { it.isNotEmpty() }, chatId)),
+            body(PostMessageBody.serializer(), PostMessageBody(text, answer, replyTo, clientMsgId, attachmentIds.takeIf { it.isNotEmpty() }, chatId)),
             Message.serializer(),
         )
+
+    fun markDelivered(msgId: String) {
+        call<Unit>("POST", "/v1/messages/$msgId/delivered", "".toRequestBody(null), null)
+    }
 
     fun markRead(msgId: String) {
         call<Unit>("POST", "/v1/messages/$msgId/read", "".toRequestBody(null), null)
@@ -90,8 +99,8 @@ class RelayApi(
      * phone's LiveKit join info right away; the call rings until the agent accepts.
      * Fails with 503 `agent_offline` / `calls_unavailable` or 409 `busy`.
      */
-    fun createCall(reason: String? = null, chatId: String? = null): CallWithJoin =
-        call("POST", "/v1/calls", body(CreateCallBody.serializer(), CreateCallBody(reason, chatId)), CallWithJoin.serializer())
+    fun createCall(reason: String? = null, chatId: String? = null, callee: String? = null, sessionMode: String? = null, clientCallId: String? = null): CallWithJoin =
+        call("POST", "/v1/calls", body(CreateCallBody.serializer(), CreateCallBody(reason, chatId, callee, sessionMode, clientCallId)), CallWithJoin.serializer())
 
     fun getCall(callId: String): Call = call("GET", "/v1/calls/$callId", null, Call.serializer())
 

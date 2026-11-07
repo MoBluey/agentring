@@ -54,6 +54,10 @@ class ConnectionManager : DefaultLifecycleObserver {
                     else -> Unit
                 }
                 Graph.messages.apply(event, advanceSeq = true)
+                if (event is Event.MsgNew && event.from == "agent") Graph.appScope.launch(Dispatchers.IO) {
+                    Graph.messages.markAgentMessagesDelivered(api)
+                    if (dev.agentring.app.ui.AppVisibility.isForeground && dev.agentring.app.ui.AppVisibility.visibleChatId == event.chatId) Graph.messages.markAgentMessagesRead(api, event.chatId)
+                }
             }
 
             override fun onState(state: RelaySocket.State) {
@@ -73,6 +77,7 @@ class ConnectionManager : DefaultLifecycleObserver {
         Graph.appScope.launch(Dispatchers.IO) {
             try {
                 Graph.messages.refresh(api)
+                Graph.messages.markAgentMessagesDelivered(api)
                 // A group call may be going on without this phone (missed ring, push lost): offer to join.
                 Graph.calls.onActiveCall(api.status().activeCall)
             } catch (e: RelayException) {

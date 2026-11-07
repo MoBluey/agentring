@@ -1,0 +1,1 @@
+{"type": "msg.new", "id": "evt_01JB0000000000000000000021", "ts": 1761200001000, "seq": 49, "msg_id": "msg_01JB0000000000000000000021", "from": "user", "text": "Ship it", "chat_id": "chat_default", "reply_to": "msg_01JB0000000000000000000020", "answer": {"question_id": "msg_01JB0000000000000000000020", "option_id": "ship"}}

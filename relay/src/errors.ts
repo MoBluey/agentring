@@ -13,6 +13,8 @@ export type ErrorCode =
   | "rate_limited"
   | "quota_exceeded"
   | "tenant_disabled"
+  | "question_answered"
+  | "idempotency_conflict"
   | "internal";
 
 export class ApiError extends Error {

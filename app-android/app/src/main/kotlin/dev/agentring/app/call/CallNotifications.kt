@@ -48,7 +48,7 @@ object CallNotifications {
         nm.createNotificationChannel(silent(CHANNEL_IN_PROGRESS, R.string.channel_calls_in_progress, NotificationManager.IMPORTANCE_DEFAULT))
     }
 
-    private fun person(info: CallInfo) = Person.Builder().setName(info.displayName + " · " + info.callerLabel).setKey("agent").setImportant(true).build()
+    private fun person(info: CallInfo) = Person.Builder().setName(info.displayName).setKey("agent").setImportant(true).build()
 
     private fun activityIntent(context: Context, action: String?, requestCode: Int): PendingIntent {
         val i = Intent(context, CallActivity::class.java)
@@ -73,7 +73,7 @@ object CallNotifications {
         return NotificationCompat.Builder(context, if (info.urgent) CHANNEL_CALLS_URGENT else CHANNEL_CALLS)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(info.displayName)
-            .setContentText(info.notificationText)
+            .setContentText(info.callerLabel)
             .setStyle(NotificationCompat.CallStyle.forIncomingCall(person(info), decline, answer))
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
@@ -142,7 +142,7 @@ object CallNotifications {
         )
         val b = NotificationCompat.Builder(context, CHANNEL_IN_PROGRESS)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(context.getString(R.string.call_in_progress_with, info.agentName))
+            .setContentTitle(context.getString(R.string.call_in_progress_with, info.displayName))
             .setContentText(info.notificationText)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
@@ -170,7 +170,7 @@ object CallNotifications {
         )
         val n = NotificationCompat.Builder(context, CHANNEL_MISSED)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(context.getString(R.string.call_missed_from, info.agentName))
+            .setContentTitle(context.getString(R.string.call_missed_from, info.displayName))
             .setContentText(info.notificationText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(info.notificationText))
             .setCategory(NotificationCompat.CATEGORY_MISSED_CALL)

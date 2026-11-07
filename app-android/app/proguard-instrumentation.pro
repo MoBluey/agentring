@@ -333,3 +333,16 @@
 -keep,includedescriptorclasses class kotlinx.coroutines.ParentJob { public *; protected *; }
 -keep,includedescriptorclasses class kotlinx.coroutines.internal.MainDispatcherFactory { public *; protected *; }
 -keep,includedescriptorclasses class kotlinx.coroutines.internal.ThreadSafeHeapNode { public *; protected *; }
+
+# Selection instrumentation constructs/reads TextRange across the shared app boundary.
+-keep,allowoptimization,includedescriptorclasses class androidx.compose.ui.text.TextRange { public *; protected *; }
+-keep,allowoptimization,includedescriptorclasses class androidx.compose.ui.text.TextRangeKt { public *; protected *; }
+
+-keep,allowoptimization,includedescriptorclasses class dev.agentring.app.data.PairingStore { public *; protected *; }
+-keep,allowoptimization,includedescriptorclasses class dev.agentring.core.Question { public *; protected *; }
+-keep,allowoptimization,includedescriptorclasses class dev.agentring.core.QuestionOption { public *; protected *; }
+
+# Real agent-socket fixture consumes the same public production transport ABI.
+-keep,allowoptimization,includedescriptorclasses class dev.agentring.core.RelayApi { public *; protected *; }
+-keep,allowoptimization,includedescriptorclasses class dev.agentring.core.RelaySocket { public *; protected *; }
+-keep,includedescriptorclasses interface dev.agentring.core.RelaySocket$Listener { public *; }

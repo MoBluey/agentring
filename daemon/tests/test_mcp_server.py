@@ -60,7 +60,7 @@ def test_mcp_server_messages(relay: str, agentring_home):
         c.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         assert c.request("ping")["result"] == {}
         names = [t["name"] for t in c.request("tools/list")["result"]["tools"]]
-        assert names == ["send_message", "get_replies", "call", "status", "open_chat", "send_file", "download_file"]
+        assert names == ["send_message", "get_replies", "call", "status", "open_chat", "ask_question", "acknowledge_replies", "send_file", "download_file"]
 
         st = c.tool("status")
         assert not st["isError"] and st["structuredContent"]["phones"][0]["name"] == "Test Phone"
@@ -81,6 +81,14 @@ def test_mcp_server_messages(relay: str, agentring_home):
         assert [(m["text"], m["reply_to"]) for m in got] == [("sí", msg_id)]
         assert time.time() - t0 < 15
         assert c.tool("get_replies")["structuredContent"] == {"replies": []}  # each reply once
+
+        question = c.tool("ask_question", text="**Pick one**", options=[{"id": "yes", "label": "Yes"}, {"id": "no", "label": "No"}], client_msg_id="stdio-question")["structuredContent"]
+        chosen = {"question_id": question["msg_id"], "option_id": "yes"}
+        answer = httpx.post(f"{relay}/v1/messages", headers=phone["headers"], json={"text": "", "client_msg_id": "stdio-answer", "answer": chosen})
+        assert answer.status_code == 201, answer.text
+        structured = c.tool("get_replies")["structuredContent"]["replies"]
+        assert structured[0]["answer"] == chosen and structured[0]["text"] == "Yes"
+        assert c.tool("acknowledge_replies", msg_ids=[structured[0]["msg_id"]])["structuredContent"]["acknowledged"] == [structured[0]["msg_id"]]
 
         call = c.tool("call", reason="test")
         assert call["isError"] and ("GEMINI_API_KEY" in call["content"][0]["text"]

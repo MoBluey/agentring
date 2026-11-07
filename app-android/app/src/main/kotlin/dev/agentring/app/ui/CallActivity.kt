@@ -234,12 +234,14 @@ fun CallScreen(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier.size(104.dp).background(Brush.linearGradient(listOf(Color(0xFFFF8A4C), Color(0xFFC2410C))), CircleShape),
             ) {
-                Text(info.agentName.trim().take(1).uppercase().ifEmpty { "A" }, fontSize = 44.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+                Text(info.displayName.trim().take(1).uppercase().ifEmpty { "A" }, fontSize = 44.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
             }
             Spacer(Modifier.height(20.dp))
             Text(info.displayName, fontSize = 34.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, modifier = Modifier.testTag("call_agent"))
             Spacer(Modifier.height(10.dp))
-            Text(info.callerLabel, fontSize = 16.sp, textAlign = TextAlign.Center, modifier = Modifier.testTag("call_caller"))
+            Text(info.modelLine, fontSize = 16.sp, textAlign = TextAlign.Center, modifier = Modifier.testTag("call_model"))
+            Spacer(Modifier.height(6.dp))
+            Text(info.projectLine, fontSize = 16.sp, textAlign = TextAlign.Center, modifier = Modifier.testTag("call_project"))
             Spacer(Modifier.height(10.dp))
             Text(statusText(state), fontSize = 18.sp, color = Color(0xFFB8C4CC), modifier = Modifier.testTag("call_status"))
             if (info.reason.isNotBlank()) {
@@ -290,7 +292,7 @@ fun CallScreen(
 @Composable
 private fun statusText(state: CallUi): String = when (state) {
     is CallUi.Incoming -> stringResource(R.string.call_incoming)
-    is CallUi.Outgoing -> stringResource(R.string.call_calling, state.info.agentName)
+    is CallUi.Outgoing -> stringResource(R.string.call_calling, state.info.targetName)
     is CallUi.Connecting -> stringResource(R.string.call_connecting)
     is CallUi.Active -> if (state.reconnecting) stringResource(R.string.call_reconnecting) else elapsed(state.since)
     is CallUi.Ended -> stringResource(state.messageRes)

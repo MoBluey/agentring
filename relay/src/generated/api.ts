@@ -443,6 +443,25 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/messages/{msg_id}/delivered": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                msg_id: components["parameters"]["MsgId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Acknowledge actual receipt of a message from the other party (emits msg.delivered once). */
+        post: operations["markMessageDelivered"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/messages/{msg_id}/read": {
         parameters: {
             query?: never;
@@ -454,7 +473,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Mark a message from the other party as read (emits `msg.read` once). */
+        /** Mark actual reading/consumption by the other party (also proves delivery; emits each receipt once). */
         post: operations["markMessageRead"];
         delete?: never;
         options?: never;
@@ -528,7 +547,7 @@ export interface components {
         /** @enum {string} */
         CallState: "ringing" | "active" | "ended" | "missed" | "declined" | "canceled";
         /** @enum {string} */
-        EndReason: "hangup" | "canceled" | "room_closed" | "error" | "quota";
+        EndReason: "hangup" | "canceled" | "room_closed" | "error" | "quota" | "callee_unavailable";
         Error: {
             error: {
                 /**
@@ -631,7 +650,22 @@ export interface components {
             revoked_at?: components["schemas"]["Timestamp"];
             has_push_token: boolean;
         };
+        /** @enum {string} */
+        CallCallee: "claude" | "codex";
+        /** @enum {string} */
+        CallSessionMode: "new" | "existing";
+        CallSessionBinding: {
+            client_session_id: string;
+            callee: components["schemas"]["CallCallee"];
+            caller: components["schemas"]["Caller"] & Record<string, never>;
+        };
+        AcceptCallRequest: {
+            session?: components["schemas"]["CallSessionBinding"];
+        };
         CreateCallRequest: {
+            client_call_id?: string;
+            callee?: components["schemas"]["CallCallee"];
+            session_mode?: components["schemas"]["CallSessionMode"];
             /** @description Defaults to chat_default. */
             chat_id?: string;
             /** @description Required when the agent calls; optional when the user calls. */
@@ -650,6 +684,9 @@ export interface components {
             device_ids?: components["schemas"]["DeviceId"][];
         };
         Call: {
+            client_call_id?: string;
+            callee?: components["schemas"]["CallCallee"];
+            session_mode?: components["schemas"]["CallSessionMode"];
             /** @description Defaults to chat_default. */
             chat_id?: string;
             chat?: components["schemas"]["Chat"];
@@ -697,12 +734,14 @@ export interface components {
             project?: string;
         };
         PostChatRequest: {
+            callee?: components["schemas"]["CallCallee"];
             client_session_id: string;
             title?: string;
             description?: string;
             caller?: components["schemas"]["Caller"];
         };
         Chat: {
+            callee?: components["schemas"]["CallCallee"];
             chat_id: string;
             client_session_id: string;
             title: string;
@@ -722,7 +761,45 @@ export interface components {
              */
             type: "chat.updated";
         };
+        QuestionOption: {
+            id: string;
+            label: string;
+        };
+        /** @description Single-choice question. Only agent credentials may originate it. Option IDs must be unique. */
+        QuestionRequest: {
+            options: components["schemas"]["QuestionOption"][];
+            allow_free_text?: boolean;
+        };
+        Question: {
+            options: components["schemas"]["QuestionOption"][];
+            allow_free_text?: boolean;
+            answered_by_msg_id?: components["schemas"]["MsgId"];
+            answered_at?: components["schemas"]["Timestamp"];
+        };
+        /** @description One explicit selected option OR a free-written answer, submitted by a paired device in the question's chat. */
+        QuestionAnswer: {
+            question_id: components["schemas"]["MsgId"];
+            option_id?: string;
+            free_text?: string;
+        } & (unknown | unknown);
+        QuestionAnsweredEvent: components["schemas"]["EventBase"] & {
+            /** @constant */
+            type: "question.answered";
+            chat_id: string;
+            question_id: components["schemas"]["MsgId"];
+            answer_msg_id: components["schemas"]["MsgId"];
+            answered_at: components["schemas"]["Timestamp"];
+        } & {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "question.answered";
+        };
+        /** @description Question and answer messages require a nonempty client_msg_id. Question text is the prompt; answer text is derived by the relay. */
         PostMessageRequest: {
+            question?: components["schemas"]["QuestionRequest"];
+            answer?: components["schemas"]["QuestionAnswer"];
             /** @description Defaults to chat_default. */
             chat_id?: string;
             text: string;
@@ -742,6 +819,8 @@ export interface components {
             created_at: components["schemas"]["Timestamp"];
         };
         Message: {
+            question?: components["schemas"]["Question"];
+            answer?: components["schemas"]["QuestionAnswer"];
             /** @description Defaults to chat_default. */
             chat_id?: string;
             msg_id: components["schemas"]["MsgId"];
@@ -753,6 +832,7 @@ export interface components {
             /** @description Sending device when `from` = user. */
             device_id?: components["schemas"]["DeviceId"];
             created_at: components["schemas"]["Timestamp"];
+            delivered_at?: components["schemas"]["Timestamp"];
             read_at?: components["schemas"]["Timestamp"];
         };
         EventBase: {
@@ -762,7 +842,7 @@ export interface components {
             /** @description Position in the relay event log. Absent on ephemeral events. */
             seq?: number;
         };
-        Event: components["schemas"]["ChatUpdatedEvent"] | components["schemas"]["CallInviteEvent"] | components["schemas"]["CallRingingEvent"] | components["schemas"]["CallAcceptEvent"] | components["schemas"]["CallDeclineEvent"] | components["schemas"]["CallEndEvent"] | components["schemas"]["CallMissedEvent"] | components["schemas"]["MsgNewEvent"] | components["schemas"]["MsgReadEvent"] | components["schemas"]["AgentPresenceEvent"] | components["schemas"]["WsHelloEvent"];
+        Event: components["schemas"]["MsgDeliveredEvent"] | components["schemas"]["QuestionAnsweredEvent"] | components["schemas"]["ChatUpdatedEvent"] | components["schemas"]["CallInviteEvent"] | components["schemas"]["CallRingingEvent"] | components["schemas"]["CallAcceptEvent"] | components["schemas"]["CallDeclineEvent"] | components["schemas"]["CallEndEvent"] | components["schemas"]["CallMissedEvent"] | components["schemas"]["MsgNewEvent"] | components["schemas"]["MsgReadEvent"] | components["schemas"]["AgentPresenceEvent"] | components["schemas"]["WsHelloEvent"];
         /**
          * @example {
          *       "type": "call.invite",
@@ -778,6 +858,8 @@ export interface components {
          *     }
          */
         CallInviteEvent: components["schemas"]["EventBase"] & {
+            callee?: components["schemas"]["CallCallee"];
+            session_mode?: components["schemas"]["CallSessionMode"];
             chat_id?: string;
             chat?: components["schemas"]["Chat"];
             /** @constant */
@@ -820,6 +902,10 @@ export interface components {
          *     they can offer "join the call".
          */
         CallAcceptEvent: components["schemas"]["EventBase"] & {
+            chat_id?: string;
+            chat?: components["schemas"]["Chat"];
+            callee?: components["schemas"]["CallCallee"];
+            session_mode?: components["schemas"]["CallSessionMode"];
             /** @constant */
             type: "call.accept";
             call_id: components["schemas"]["CallId"];
@@ -833,6 +919,8 @@ export interface components {
             type: "call.accept";
         };
         CallDeclineEvent: components["schemas"]["EventBase"] & {
+            /** @enum {string} */
+            reason?: "callee_unavailable";
             /** @constant */
             type: "call.decline";
             call_id: components["schemas"]["CallId"];
@@ -882,6 +970,8 @@ export interface components {
          *     }
          */
         MsgNewEvent: components["schemas"]["EventBase"] & {
+            question?: components["schemas"]["Question"];
+            answer?: components["schemas"]["QuestionAnswer"];
             chat_id?: string;
             /** @constant */
             type: "msg.new";
@@ -898,6 +988,18 @@ export interface components {
              * @enum {string}
              */
             type: "msg.new";
+        };
+        MsgDeliveredEvent: components["schemas"]["EventBase"] & {
+            /** @constant */
+            type: "msg.delivered";
+            msg_id: components["schemas"]["MsgId"];
+            by: components["schemas"]["Party"];
+        } & {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "msg.delivered";
         };
         MsgReadEvent: components["schemas"]["EventBase"] & {
             /** @constant */
@@ -1336,7 +1438,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        /** @description Required session binding for explicit new/existing user calls; optional for legacy calls. */
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["AcceptCallRequest"];
+            };
+        };
         responses: {
             /** @description Accepted; state `active`. Contains the callee's join info. */
             200: {
@@ -1413,7 +1520,14 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @enum {string} */
+                    reason?: "callee_unavailable";
+                };
+            };
+        };
         responses: {
             /** @description Declined; state `declined`. */
             200: {
@@ -1662,6 +1776,8 @@ export interface operations {
     listMessages: {
         parameters: {
             query?: {
+                /** @description When true, filter read_at IS NULL before pagination; false or omitted returns all. */
+                unread?: boolean;
                 chat_id?: string;
                 /** @description Cursor; return messages with `msg_id` greater than this. */
                 after?: components["schemas"]["MsgId"];
@@ -1737,6 +1853,28 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Message"];
                 };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    markMessageDelivered: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                msg_id: components["parameters"]["MsgId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Marked (idempotent). */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];

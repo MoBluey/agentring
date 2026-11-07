@@ -6,12 +6,15 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.printToString
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
 import androidx.core.app.RemoteInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -32,6 +35,12 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import android.net.Uri
+import android.content.ClipboardManager
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.test.performTextInputSelection
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.longClick
 import android.provider.MediaStore
 import android.content.ContentValues
 import android.view.accessibility.AccessibilityNodeInfo
@@ -73,8 +82,8 @@ class SessionMediaEndToEndTest {
     private val compose = createAndroidComposeRule<MainActivity>()
 
     private val notificationPermission: TestRule =
-        if (Build.VERSION.SDK_INT >= 33) GrantPermissionRule.grant(Manifest.permission.POST_NOTIFICATIONS)
-        else TestRule { base, _ -> base }
+        if (Build.VERSION.SDK_INT >= 33) GrantPermissionRule.grant(Manifest.permission.POST_NOTIFICATIONS, Manifest.permission.RECORD_AUDIO)
+        else GrantPermissionRule.grant(Manifest.permission.RECORD_AUDIO)
 
     @get:Rule
     val rules: RuleChain = RuleChain.outerRule(notificationPermission).around(compose)
@@ -107,9 +116,18 @@ class SessionMediaEndToEndTest {
     }
 
     private fun waitForTag(tag: String, text: String? = null, timeoutMs: Long = 15_000) {
+        if (tag.startsWith("chat_chat_")) {
+            compose.waitUntil(timeoutMs) { Graph.messages.chats.value.any { "chat_${it.chatId}" == tag } }
+            compose.onNodeWithTag("chat_list").performScrollToNode(hasTestTag(tag))
+        }
         val matcher = if (text == null) hasTestTag(tag) else hasTestTag(tag).and(hasText(text, substring = true))
         try { compose.waitUntil(timeoutMs) { runCatching { compose.onAllNodes(matcher).fetchSemanticsNodes().isNotEmpty() }.getOrDefault(false) } }
-        catch (e: Exception) { screenshot("session-failure-$tag"); throw e }
+        catch (e: Throwable) { println(compose.onRoot(useUnmergedTree = true).printToString()); println("WAIT_DIAGNOSTIC tag=$tag chats=${Graph.messages.chats.value.map { it.chatId }} messages=${Graph.messages.messages.value.size} seq=${Graph.messages.lastSeq} foreground=${dev.agentring.app.ui.AppVisibility.isForeground} socket=${Graph.connection.relayState.value}"); screenshot("session-failure-$tag"); throw e }
+    }
+
+    private fun openChat(chatId: String) {
+        waitForTag("chat_$chatId")
+        compose.onNodeWithTag("chat_$chatId").performClick()
     }
 
     private fun waitForText(text: String, timeoutMs: Long = 15_000) {
@@ -127,8 +145,7 @@ class SessionMediaEndToEndTest {
         }
     }
 
-    @Test
-    fun twoSessionsSendReceiveFilesAndLabelIncomingCall() {
+    private fun pairNormally() {
         val qr = agent("POST", "/v1/pairing-tokens", "{}")["qr_payload"]!!.jsonPrimitive.content
         compose.onNodeWithTag("get_started").performClick()
         waitForTag("show_paste")
@@ -141,14 +158,122 @@ class SessionMediaEndToEndTest {
         compose.onNodeWithTag("continue").performClick()
         waitForTag("relay_status", context.getString(R.string.connected), timeoutMs = 20_000)
 
-        val first = agent("POST", "/v1/chats", """{"client_session_id":"android-session-claude","title":"Claude · claude-sonnet-4-5 · Orchard","description":"Coding session for Orchard","caller":{"provider":"Anthropic","model":"claude-sonnet-4-5","project":"Orchard"}}""")
-        val second = agent("POST", "/v1/chats", """{"client_session_id":"android-session-codex","title":"Codex · gpt-5.1-codex · Harbour","description":"Coding session for Harbour","caller":{"provider":"OpenAI","model":"gpt-5.1-codex","project":"Harbour"}}""")
+    }
+
+    @Test
+    fun twoSessionsSendReceiveFilesAndLabelIncomingCall() {
+        pairNormally()
+
+        val sessionStamp = System.currentTimeMillis().toString()
+        val first = agent("POST", "/v1/chats", """{"client_session_id":"android-session-claude-$sessionStamp","title":"Claude · claude-sonnet-4-5 · Orchard","description":"Coding session for Orchard","caller":{"provider":"Anthropic","model":"claude-sonnet-4-5","project":"Orchard"}}""")
+        val second = agent("POST", "/v1/chats", """{"client_session_id":"android-session-codex-$sessionStamp","title":"Codex · gpt-5.1-codex · Harbour","description":"Coding session for Harbour","caller":{"provider":"OpenAI","model":"gpt-5.1-codex","project":"Harbour"}}""")
         val firstId = first["chat_id"]!!.jsonPrimitive.content
         val secondId = second["chat_id"]!!.jsonPrimitive.content
         compose.onNodeWithTag("tab_messages").performClick()
         waitForTag("chat_$firstId")
         waitForTag("chat_$secondId")
         screenshot("sessions")
+
+        // Real composer selection formats visible text; Markdown remains the transport value.
+        openChat(firstId)
+        waitForTag("message_input")
+        val editor = compose.onNodeWithTag("message_input")
+        val richStamp = System.currentTimeMillis().toString()
+        editor.performTextInput("alpha beta gamma $richStamp")
+        editor.performTextInputSelection(TextRange(6, 10))
+        compose.onNodeWithTag("format_bold").performClick()
+        editor.performTextInputSelection(TextRange(0, 5))
+        compose.onNodeWithTag("format_highlight").performClick()
+        waitForTag("message_input", "alpha beta gamma")
+        screenshot("rich-composer")
+        compose.onNodeWithTag("send_button").performClick()
+        val formattedRaw = "==alpha== **beta** gamma $richStamp"
+        var formattedMessage: JsonObject? = null
+        waitFor(what = "formatted user message on real relay") {
+            formattedMessage = agent("GET", "/v1/messages?chat_id=$firstId&from=user")["messages"]!!.jsonArray.map { it.jsonObject }.lastOrNull { it["text"]!!.jsonPrimitive.content == formattedRaw }
+            formattedMessage != null
+        }
+        val userId = formattedMessage!!["msg_id"]!!.jsonPrimitive.content
+        waitForTag("message_text_${userId}_0", "alpha beta gamma")
+        compose.onNodeWithTag("copy_message_$userId").performScrollTo().performClick()
+        val clipboard = context.getSystemService(ClipboardManager::class.java)
+        assertEquals(formattedRaw, clipboard.primaryClip!!.getItemAt(0).text.toString())
+
+        val code = "  println(\"agent code\")\nprintln(\"done\")"
+        val rawRich = "Select alpha beta\n\n**Bold agent** and ==highlight==\n\n```kotlin\n$code\n```"
+        val rich = agent("POST", "/v1/messages", org.json.JSONObject().put("chat_id", firstId).put("text", rawRich).toString())
+        val richId = rich["msg_id"]!!.jsonPrimitive.content
+        waitForTag("copy_code_${richId}_1")
+        compose.onNodeWithTag("copy_message_$richId").performScrollTo().performClick()
+        assertEquals(rawRich, clipboard.primaryClip!!.getItemAt(0).text.toString())
+        compose.onNodeWithTag("copy_code_${richId}_1").performScrollTo().performClick()
+        assertEquals(code, clipboard.primaryClip!!.getItemAt(0).text.toString())
+        compose.onNodeWithTag("message_text_${richId}_0").performScrollTo().performTouchInput { longClick(Offset(20f, 20f)) }
+        nativeClick("Copy")
+        val selectedText = clipboard.primaryClip!!.getItemAt(0).text.toString()
+        assertTrue("Selected actual message text", selectedText.isNotBlank() && selectedText.length < rawRich.length && rawRich.contains(selectedText))
+        compose.onNodeWithTag("message_input").performClick()
+        screenshot("rich-agent-message")
+
+        val userCode = "println(\"user code $richStamp\")"
+        editor.performTextInput(userCode)
+        editor.performTextInputSelection(TextRange(0, userCode.length))
+        compose.onNodeWithTag("format_code").performClick()
+        compose.onNodeWithTag("send_button").performClick()
+        val userCodeRaw = "```\n$userCode\n```"
+        var codeMessage: JsonObject? = null
+        waitFor(what = "fenced user code on relay") {
+            codeMessage = agent("GET", "/v1/messages?chat_id=$firstId&from=user")["messages"]!!.jsonArray.map { it.jsonObject }.lastOrNull { it["text"]!!.jsonPrimitive.content == userCodeRaw }
+            codeMessage != null
+        }
+        val codeId = codeMessage!!["msg_id"]!!.jsonPrimitive.content
+        waitForTag("copy_code_${codeId}_0")
+        compose.onNodeWithTag("copy_code_${codeId}_0").performScrollTo().performClick()
+        assertEquals(userCode, clipboard.primaryClip!!.getItemAt(0).text.toString())
+        // Each receipt proves the recipient's explicit acknowledgement, not a history fetch.
+        waitForTag("timestamp_$codeId", "✓ Sent")
+        agent("GET", "/v1/messages/$codeId")
+        assertTrue(agent("GET", "/v1/messages/$codeId")["read_at"] == null)
+        agent("POST", "/v1/messages/$codeId/delivered", "{}")
+        waitForTag("timestamp_$codeId", "✓✓ Delivered")
+        agent("POST", "/v1/messages/$codeId/read", "{}")
+        waitForTag("timestamp_$codeId", "✓✓ Read")
+        val questionIds = mutableListOf<String>()
+        for (writtenAnswer in listOf(false, true)) {
+            val questionJson = org.json.JSONObject().put("chat_id", firstId).put("client_msg_id", "question-$richStamp-$writtenAnswer")
+                .put("text", if (writtenAnswer) "**What should change?**" else "**Deploy this build?**")
+                .put("question", org.json.JSONObject().put("allow_free_text", true).put("options", org.json.JSONArray()
+                    .put(org.json.JSONObject().put("id", "ship").put("label", "Ship it"))
+                    .put(org.json.JSONObject().put("id", "hold").put("label", "Hold"))))
+            val q = agent("POST", "/v1/messages", questionJson.toString())
+            val qid = q["msg_id"]!!.jsonPrimitive.content
+            questionIds += qid
+            waitForTag("question_$qid")
+            if (writtenAnswer) compose.onNodeWithTag("answer_text_$qid").performScrollTo().performTextInput("Change the button label $richStamp")
+            else compose.onNodeWithTag("option_${qid}_hold").performScrollTo().performClick()
+            assertTrue("Selecting a choice never submits", agent("GET", "/v1/messages/$qid")["question"]!!.jsonObject["answered_by_msg_id"] == null)
+            screenshot(if (writtenAnswer) "written-question" else "choice-question")
+            compose.onNodeWithTag("answer_send_$qid").performScrollTo().performClick()
+            waitForTag("answered_$qid")
+            val restored = agent("GET", "/v1/messages/$qid")
+            val answerId = restored["question"]!!.jsonObject["answered_by_msg_id"]!!.jsonPrimitive.content
+            val answer = agent("GET", "/v1/messages/$answerId")
+            assertEquals(firstId, answer["chat_id"]!!.jsonPrimitive.content)
+            assertEquals(qid, answer["reply_to"]!!.jsonPrimitive.content)
+            assertEquals(qid, answer["answer"]!!.jsonObject["question_id"]!!.jsonPrimitive.content)
+            assertEquals(if (writtenAnswer) "Change the button label $richStamp" else "Hold", answer["text"]!!.jsonPrimitive.content)
+            assertTrue(agent("GET", "/v1/messages?chat_id=$secondId")["messages"]!!.jsonArray.none { it.jsonObject["msg_id"]!!.jsonPrimitive.content == answerId })
+            waitFor(what = "phone delivery/read acknowledgement") {
+                val saved = agent("GET", "/v1/messages/$qid")
+                saved["delivered_at"] != null && saved["read_at"] != null
+            }
+        }
+        compose.activityRule.scenario.recreate()
+        waitForTag("tab_messages")
+        Notifications.openMessagesIntent(context, firstId).send()
+        waitForTag("answered_${questionIds.last()}")
+        screenshot("answered-question-recreated")
+        compose.onNodeWithTag("back_chats").performClick()
 
         val bitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888).apply { eraseColor(android.graphics.Color.BLUE) }
         val png = ByteArrayOutputStream().also { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
@@ -164,8 +289,11 @@ class SessionMediaEndToEndTest {
         )
         for ((index, fixture) in fixtures.withIndex()) {
             val chatId = if (index % 2 == 0) firstId else secondId
-            compose.onNodeWithTag("chat_$chatId").performClick()
+            openChat(chatId)
             waitForTag("message_input")
+            waitForTag("chat_provider", if (index % 2 == 0) "Anthropic" else "OpenAI")
+            waitForTag("chat_model", if (index % 2 == 0) "Model: claude-sonnet-4-5" else "Model: gpt-5.1-codex")
+            waitForTag("chat_project", if (index % 2 == 0) "Project: Orchard" else "Project: Harbour")
             if (index == 0) {
                 compose.onNodeWithTag("attach_button").performClick()
                 Thread.sleep(500)
@@ -184,13 +312,19 @@ class SessionMediaEndToEndTest {
                 compose.onNodeWithTag("attach_button").performClick()
                 pickDocument(fixture.first)
                 waitForText(fixture.first)
-                compose.onNodeWithTag("message_input").performTextInput("Reply in session $index ($stamp)")
+                if (index != 1) compose.onNodeWithTag("message_input").performTextInput("Reply in session $index ($stamp)")
                 compose.onNodeWithTag("send_button").performClick()
                 var sent: JsonObject? = null
                 waitFor(what = "scoped attachment reply") {
-                    sent = agent("GET", "/v1/messages?chat_id=$chatId&from=user")["messages"]!!.jsonArray.map { it.jsonObject }.firstOrNull { it["text"]?.jsonPrimitive?.content == "Reply in session $index ($stamp)" }
+                    sent = agent("GET", "/v1/messages?chat_id=$chatId&from=user")["messages"]!!.jsonArray.map { it.jsonObject }.firstOrNull { if (index == 1) it["attachments"]?.jsonArray?.any { a -> a.jsonObject["name"]!!.jsonPrimitive.content == fixture.first } == true else it["text"]?.jsonPrimitive?.content == "Reply in session $index ($stamp)" }
                     sent != null
                 }
+                val sentId = sent!!["msg_id"]!!.jsonPrimitive.content
+                waitForTag("timestamp_$sentId", "✓ Sent")
+                agent("POST", "/v1/messages/$sentId/delivered", "{}")
+                waitForTag("timestamp_$sentId", "✓✓ Delivered")
+                agent("POST", "/v1/messages/$sentId/read", "{}")
+                waitForTag("timestamp_$sentId", "✓✓ Read")
                 val attachment = sent!!["attachments"]!!.jsonArray.single().jsonObject
                 assertEquals(chatId, sent!!["chat_id"]!!.jsonPrimitive.content)
                 val uploadedBytes = agentBytes("/v1/attachments/${attachment["attachment_id"]!!.jsonPrimitive.content}/content")
@@ -220,7 +354,7 @@ class SessionMediaEndToEndTest {
             compose.onNodeWithTag("back_chats").performClick()
         }
         // Switch through a notification while the old conversation has a draft.
-        compose.onNodeWithTag("chat_$firstId").performClick()
+        openChat(firstId)
         compose.onNodeWithTag("message_input").performTextInput("Draft belongs to Orchard")
         Notifications.openMessagesIntent(context, secondId).send()
         compose.waitUntil(15_000) { dev.agentring.app.ui.AppVisibility.visibleChatId == secondId }
@@ -232,6 +366,53 @@ class SessionMediaEndToEndTest {
         val backgroundChat = agent("POST", "/v1/chats", """{"client_session_id":"background-$stamp","title":"Background session","caller":{"provider":"OpenAI","model":"new-session-model","project":"Background project"}}""")
         val backgroundId = backgroundChat["chat_id"]!!.jsonPrimitive.content
         assertTrue(Graph.messages.chats.value.none { it.chatId == backgroundId })
+        // A truncated push cannot acknowledge an absent body after REST hydration fails.
+        val originalPairing = Graph.pairing.current!!
+        Graph.pairing.save(originalPairing.copy(relayUrl = originalPairing.relayUrl + "/unavailable")); Graph.pairing.setSetupComplete(true)
+        val partial = try { agent("POST", "/v1/messages", org.json.JSONObject().put("chat_id", backgroundId).put("client_msg_id", "partial-$stamp")
+            .put("text", "Complete question after retry\n" + "x".repeat(3900)).put("question", org.json.JSONObject().put("allow_free_text", true)
+                .put("options", org.json.JSONArray().put(org.json.JSONObject().put("id", "yes").put("label", "Yes"))
+                    .put(org.json.JSONObject().put("id", "no").put("label", "No")))).toString()) }
+        catch (e: Exception) { Graph.pairing.save(originalPairing); Graph.pairing.setSetupComplete(true); throw e }
+        val partialId = partial["msg_id"]!!.jsonPrimitive.content
+        val partialEvent = org.json.JSONObject().put("type", "msg.new").put("id", "partial-$stamp").put("ts", partial["created_at"]!!.jsonPrimitive.content.toLong())
+            .put("msg_id", partialId).put("from", "agent").put("text", "Complete…").put("chat_id", backgroundId).put("truncated", true).toString()
+        val partialPush = mapOf("v" to "1", "relay_id" to originalPairing.relayId, "event" to partialEvent, "sig" to PushVerifier.sign(originalPairing.pushSecret, partialEvent))
+        try {
+            Graph.pairing.save(originalPairing.copy(relayUrl = originalPairing.relayUrl + "/unavailable")); Graph.pairing.setSetupComplete(true)
+            assertTrue(PushHandler.handle(context, partialPush) is PushHandler.Outcome.Notified)
+            waitFor(what = "safe pending notification after failed full hydration") {
+                context.getSystemService(NotificationManager::class.java).activeNotifications.any {
+                    it.tag == backgroundId && it.id == Notifications.ID_MESSAGES &&
+                        it.notification.extras.getCharSequence(android.app.Notification.EXTRA_TEXT).toString().contains("Waiting for connection")
+                }
+            }
+            shell("cmd statusbar expand-notifications")
+            InstrumentationRegistry.getInstrumentation().uiAutomation.waitForIdle(500, 5_000)
+            nativeWait("Waiting for", substring = true)
+            shell("screencap -p /data/local/tmp/pending-message-notification.png")
+            shell("cmd statusbar collapse")
+            assertTrue(Graph.messages.messages.value.none { it.msgId == partialId })
+            val untouched = agent("GET", "/v1/messages/$partialId")
+            assertTrue(untouched["delivered_at"] == null && untouched["read_at"] == null)
+        } finally { Graph.pairing.save(originalPairing); Graph.pairing.setSetupComplete(true) }
+        // The complete response is received but a failed atomic cache write must still block delivery.
+        val temporaryCache = java.io.File(context.filesDir, "messages.json.tmp")
+        assertTrue(temporaryCache.mkdir())
+        try {
+            PushHandler.handle(context, partialPush)
+            Graph.messages.markAgentMessagesRead(Graph.api()!!, backgroundId)
+            val untouched = agent("GET", "/v1/messages/$partialId")
+            assertTrue("Failed cache write cannot report delivered/read", untouched["delivered_at"] == null && untouched["read_at"] == null)
+        } finally { assertTrue(temporaryCache.delete()) }
+        assertTrue(PushHandler.handle(context, partialPush) is PushHandler.Outcome.Notified)
+        val completeQuestion = Graph.messages.messages.value.single { it.msgId == partialId }
+        assertEquals(2, completeQuestion.question!!.options.size)
+        val deliveredQuestion = agent("GET", "/v1/messages/$partialId")
+        assertTrue(deliveredQuestion["delivered_at"] != null && deliveredQuestion["read_at"] == null)
+
+        // Separate forced failure/retry pushes from the normal notification scenario (Android limits enqueue rate).
+        Thread.sleep(1_500)
         val backgroundMessage = agent("POST", "/v1/messages", """{"chat_id":"$backgroundId","text":"First background message"}""")
         val event = agent("GET", "/v1/events?after_seq=${Graph.messages.lastSeq}&limit=500")["events"]!!.jsonArray.map { it.jsonObject }
             .first { it["msg_id"]?.jsonPrimitive?.content == backgroundMessage["msg_id"]!!.jsonPrimitive.content }.toString()
@@ -239,7 +420,7 @@ class SessionMediaEndToEndTest {
         assertTrue(PushHandler.handle(context, mapOf("v" to "1", "relay_id" to pairing.relayId, "event" to event, "sig" to PushVerifier.sign(pairing.pushSecret, event))) is PushHandler.Outcome.Notified)
         assertEquals("new-session-model", Graph.messages.chats.value.first { it.chatId == backgroundId }.caller.model)
         val nm = context.getSystemService(NotificationManager::class.java)
-        waitFor(what = "labelled new-session notification") { nm.activeNotifications.any { it.tag == backgroundId && androidx.core.app.NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(it.notification)?.messages?.lastOrNull()?.person?.name.toString().contains("new-session-model") } }
+        waitFor(what = "labelled new-session notification") { nm.activeNotifications.any { it.tag == backgroundId && it.notification.extras.getCharSequence(android.app.Notification.EXTRA_TITLE).toString() == "OpenAI" && it.notification.extras.getCharSequence(android.app.Notification.EXTRA_BIG_TEXT).toString().contains("Model: new-session-model\nProject: Background project") } }
         // A known backgrounded session can switch models before its next message.
         agent("POST", "/v1/chats", """{"client_session_id":"background-$stamp","caller":{"provider":"OpenAI","model":"updated-session-model","project":"Background project"}}""")
         val updatedMessage = agent("POST", "/v1/messages", """{"chat_id":"$backgroundId","text":"Message after model update"}""")
@@ -247,7 +428,14 @@ class SessionMediaEndToEndTest {
             .first { it["msg_id"]?.jsonPrimitive?.content == updatedMessage["msg_id"]!!.jsonPrimitive.content }.toString()
         assertTrue(PushHandler.handle(context, mapOf("v" to "1", "relay_id" to pairing.relayId, "event" to updatedEvent, "sig" to PushVerifier.sign(pairing.pushSecret, updatedEvent))) is PushHandler.Outcome.Notified)
         assertEquals("updated-session-model", Graph.messages.chats.value.first { it.chatId == backgroundId }.caller.model)
-        waitFor(what = "updated known-session notification label") { nm.activeNotifications.any { it.tag == backgroundId && androidx.core.app.NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(it.notification)?.messages?.lastOrNull()?.person?.name.toString().contains("updated-session-model") } }
+        waitFor(what = "updated known-session notification label") { nm.activeNotifications.any { it.tag == backgroundId && it.notification.extras.getCharSequence(android.app.Notification.EXTRA_TITLE).toString() == "OpenAI" && it.notification.extras.getCharSequence(android.app.Notification.EXTRA_BIG_TEXT).toString().contains("Model: updated-session-model\nProject: Background project") } }
+        shell("cmd statusbar expand-notifications")
+        InstrumentationRegistry.getInstrumentation().uiAutomation.waitForIdle(500, 5_000)
+        if (nativeNode("Project: Background project", substring = true) == null && nativeNode("Expand notification") != null) nativeClick("Expand notification")
+        nativeWait("Model: updated-session-model", substring = true)
+        nativeWait("Project: Background project", substring = true)
+        shell("screencap -p /data/local/tmp/presentation-message-notification.png")
+        shell("cmd statusbar collapse")
         val initialNotification = nm.activeNotifications.first { it.tag == backgroundId && it.id == Notifications.ID_MESSAGES }.notification
         Notifications.openMessagesIntent(context, backgroundId).send()
         waitForTag("message_input")
@@ -264,7 +452,7 @@ class SessionMediaEndToEndTest {
         val firstReply = "Inline after read $stamp"
         reply(initialNotification, firstReply)
         waitFor(what = "first scoped inline reply") { agent("GET", "/v1/messages?chat_id=$backgroundId&from=user")["messages"]!!.jsonArray.any { it.jsonObject["text"]!!.jsonPrimitive.content == firstReply } }
-        waitFor(what = "scoped inline confirmation") { nm.activeNotifications.any { it.tag == backgroundId && androidx.core.app.NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(it.notification)?.messages?.lastOrNull()?.text.toString() == firstReply } }
+        waitFor(what = "scoped inline confirmation") { nm.activeNotifications.any { it.tag == backgroundId && it.notification.extras.getCharSequence(android.app.Notification.EXTRA_BIG_TEXT).toString().endsWith(firstReply) } }
         val confirmation = nm.activeNotifications.first { it.tag == backgroundId && it.id == Notifications.ID_MESSAGES }.notification
         val secondReply = "Second inline reply $stamp"
         reply(confirmation, secondReply)
@@ -276,7 +464,7 @@ class SessionMediaEndToEndTest {
         nm.activeNotifications.first { it.id == Notifications.ID_REPLY_FAILED && it.tag == backgroundId }.notification.contentIntent.send()
         compose.waitUntil(15_000) { dev.agentring.app.ui.AppVisibility.visibleChatId == backgroundId }
 
-        // Recreate through the normal Activity lifecycle; files and session selection survive repository cache reload.
+        // Activity recreation preserves session navigation and reloads selected history from the relay.
         compose.activityRule.scenario.recreate()
         waitForTag("tab_messages")
         Notifications.openMessagesIntent(context, secondId).send()
@@ -290,22 +478,196 @@ class SessionMediaEndToEndTest {
         waitFor(what = "posted incoming call notification") { nm.activeNotifications.any { it.id == dev.agentring.app.call.CallNotifications.ID_CALL } }
         val notification = nm.activeNotifications.first { it.id == dev.agentring.app.call.CallNotifications.ID_CALL }.notification
         val callerPerson = notification.extras.getParcelable("android.callPerson", android.app.Person::class.java)!!
-        assertTrue(callerPerson.name.toString().contains("Orchard"))
-        assertTrue(callerPerson.name.toString().contains("claude-sonnet-4-5"))
+        assertEquals("Anthropic", callerPerson.name.toString())
+        assertTrue(notification.extras.getCharSequence(android.app.Notification.EXTRA_TEXT).toString().startsWith("Model: claude-sonnet-4-5\nProject: Orchard"))
+        shell("cmd statusbar expand-notifications")
+        InstrumentationRegistry.getInstrumentation().uiAutomation.waitForIdle(500, 5_000)
+        println("CALL_NOTIFICATION_MODEL_VISIBLE=" + (nativeNode("Model: claude-sonnet-4-5", substring = true) != null))
+        println("CALL_NOTIFICATION_PROJECT_VISIBLE=" + (nativeNode("Project: Orchard", substring = true) != null))
+        shell("screencap -p /data/local/tmp/presentation-call-notification.png")
+        shell("cmd statusbar collapse")
         notification.contentIntent.send()
         waitFor(what = "CallActivity resumed from notification") {
             val descriptor = InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand("dumpsys activity activities")
             val dump = android.os.ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { String(it.readBytes()) }
             java.util.regex.Pattern.compile("(?m)^.*(?:topResumedActivity|mResumedActivity)[^\\n]*CallActivity[^\\n]*$").matcher(dump).find()
         }
-        waitForTag("call_caller", "claude-sonnet-4-5")
+        waitForTag("call_agent", "Anthropic")
+        waitForTag("call_model", "Model: claude-sonnet-4-5")
+        waitForTag("call_project", "Project: Orchard")
         nativeWait("Review Orchard build")
         InstrumentationRegistry.getInstrumentation().uiAutomation.waitForIdle(500, 5_000)
         compose.waitForIdle()
         shell("screencap -p /data/local/tmp/session-labelled-call.png")
         agent("POST", "/v1/calls/$callId/end", "{}")
         waitFor(what = "call ended") { Graph.calls.state.value == null }
+        verifyCallSelection()
+    }
 
+    /** Real installed-provider acceptance; run against the isolated development serve daemon. */
+    @Test
+    fun realProviderSessionsRetainMemory() {
+        pairNormally()
+        waitFor(timeoutMs = 30_000, what = "actual development daemon online") { Graph.connection.agentOnline.value == true }
+        val proofs = org.json.JSONArray()
+        try {
+        for (callee in listOf("claude", "codex")) {
+            compose.onNodeWithTag("tab_home").performClick()
+            waitForTag("call_$callee")
+            screenshot("real-provider-buttons")
+            compose.onNodeWithTag("call_$callee").performScrollTo().performClick()
+            var call: JsonObject? = null
+            waitFor(timeoutMs = 120_000, what = "$callee actual provider preparation and acceptance") {
+                call = agent("GET", "/v1/status")["active_call"] as? JsonObject
+                call?.get("state")?.jsonPrimitive?.content == "active" &&
+                    call?.get("chat")?.jsonObject?.get("client_session_id")?.jsonPrimitive?.content?.startsWith("pending:") == false
+            }
+            val original = call!!
+            val chat = original["chat"]!!.jsonObject
+            val chatId = chat["chat_id"]!!.jsonPrimitive.content
+            val sessionId = chat["client_session_id"]!!.jsonPrimitive.content
+            val caller = chat["caller"]!!.jsonObject
+            val provider = caller["provider"]!!.jsonPrimitive.content
+            val model = caller["model"]?.jsonPrimitive?.content?.takeUnless { it == "null" || it.isBlank() } ?: "Unknown model"
+            assertEquals(callee, original["callee"]!!.jsonPrimitive.content)
+            assertEquals("new", original["session_mode"]!!.jsonPrimitive.content)
+            assertTrue(caller["project"] == null)
+            waitForTag("call_agent", provider, timeoutMs = 30_000)
+            waitForTag("call_model", "Model: $model")
+            waitForTag("call_project", "Project: Unknown project")
+            waitForTag("call_status", "0:", timeoutMs = 30_000)
+            screenshot("real-new-$callee-call")
+            compose.onNodeWithTag("call_hang_up").performClick()
+            waitFor(what = "new $callee call ended") { Graph.calls.state.value == null }
+            waitForTag("tab_messages")
+            compose.onNodeWithTag("tab_messages").performClick()
+            openChat(chatId)
+            val token = "amber-${System.currentTimeMillis()}-$callee"
+            fun exchange(text: String, expected: String): JsonObject {
+                compose.onNodeWithTag("message_input").performTextInput(text)
+                compose.onNodeWithTag("send_button").performClick()
+                var sent: JsonObject? = null
+                var reply: JsonObject? = null
+                waitFor(timeoutMs = 120_000, what = "$callee actual same-session model text response and explicit read acknowledgement") {
+                    val messages = agent("GET", "/v1/messages?chat_id=$chatId")["messages"]!!.jsonArray.map { it.jsonObject }
+                    sent = messages.lastOrNull { it["from"]!!.jsonPrimitive.content == "user" && it["text"]!!.jsonPrimitive.content == text }
+                    val id = sent?.get("msg_id")?.jsonPrimitive?.content
+                    reply = messages.lastOrNull { it["from"]!!.jsonPrimitive.content == "agent" && it["text"]!!.jsonPrimitive.content.contains(expected) && it["reply_to"]?.jsonPrimitive?.content == id }
+                    reply != null && sent?.get("read_at") != null
+                }
+                val id = sent!!["msg_id"]!!.jsonPrimitive.content
+                compose.onNodeWithTag("message_list").performScrollToNode(hasTestTag("timestamp_$id"))
+                waitForTag("timestamp_$id", "✓✓ Read")
+                screenshot("real-$callee-text-" + if (proofs.length() == 0) "claude" else "codex")
+                return reply!!
+            }
+            val remembered = exchange("Remember this verification token: $token. Reply with exactly Stored $token.", "Stored $token")
+            compose.onNodeWithTag("call_session").performClick()
+            var existing: JsonObject? = null
+            waitFor(timeoutMs = 120_000, what = "$callee existing session call accepted") {
+                existing = agent("GET", "/v1/status")["active_call"] as? JsonObject
+                existing?.get("state")?.jsonPrimitive?.content == "active"
+            }
+            assertEquals("existing", existing!!["session_mode"]!!.jsonPrimitive.content)
+            assertEquals(chatId, existing!!["chat_id"]!!.jsonPrimitive.content)
+            assertEquals(sessionId, existing!!["chat"]!!.jsonObject["client_session_id"]!!.jsonPrimitive.content)
+            waitForTag("call_agent", provider)
+            waitForTag("call_model", "Model: $model")
+            waitForTag("call_status", "0:", timeoutMs = 30_000)
+            screenshot("real-existing-$callee-call")
+            compose.onNodeWithTag("call_hang_up").performClick()
+            waitFor(what = "existing $callee call ended") { Graph.calls.state.value == null }
+            waitForTag("message_input")
+            val recalled = exchange("What verification token did I ask you to remember? Reply with only the token.", token)
+            val proof = org.json.JSONObject().put("callee", callee).put("chat_id", chatId).put("client_session_id", sessionId)
+                .put("caller", org.json.JSONObject(caller.toString())).put("new_call_id", original["call_id"]!!.jsonPrimitive.content)
+                .put("existing_call_id", existing!!["call_id"]!!.jsonPrimitive.content).put("stored_reply_id", remembered["msg_id"]!!.jsonPrimitive.content)
+                .put("recalled_reply_id", recalled["msg_id"]!!.jsonPrimitive.content).put("memory_token", token)
+            proofs.put(proof)
+            println("REAL_PROVIDER_PROOF=" + proof.toString())
+            compose.onNodeWithTag("back_chats").performClick()
+        }
+        assertEquals(2, proofs.length())
+        assertTrue(proofs.getJSONObject(0).getString("chat_id") != proofs.getJSONObject(1).getString("chat_id"))
+        } finally {
+            (agent("GET", "/v1/status")["active_call"] as? JsonObject)?.let { active -> agent("POST", "/v1/calls/${active["call_id"]!!.jsonPrimitive.content}/end", "{}") }
+        }
+    }
+
+    /** Normal phone buttons -> REST call selection -> a real agent socket; no provider fallback. */
+    private fun verifyCallSelection() {
+        val socket = dev.agentring.core.RelaySocket(dev.agentring.core.RelayApi(relayUrl, apiKey), { Graph.messages.lastSeq }, object : dev.agentring.core.RelaySocket.Listener {
+            override fun onEvent(event: dev.agentring.core.Event) = Unit
+            override fun onState(state: dev.agentring.core.RelaySocket.State) = Unit
+            override fun onUnauthorized() = Unit
+        })
+        socket.start()
+        try {
+            waitFor(what = "real agent socket online") { Graph.connection.agentOnline.value == true }
+            val newChats = mutableSetOf<String>()
+            for (callee in listOf("claude", "codex", "codex")) {
+                waitForTag("tab_home")
+                compose.onNodeWithTag("tab_home").performClick()
+                waitForTag("call_$callee")
+                screenshot("call-provider-buttons")
+                compose.onNodeWithTag("call_$callee").performScrollTo().performClick()
+                var created: JsonObject? = null
+                waitFor(what = "normal $callee button created a call") {
+                    created = agent("GET", "/v1/status")["active_call"] as? JsonObject
+                    created?.get("direction")?.jsonPrimitive?.content == "user_to_agent"
+                }
+                val call = created!!
+                val id = call["call_id"]!!.jsonPrimitive.content
+                val chatId = call["chat_id"]!!.jsonPrimitive.content
+                assertEquals(callee, call["callee"]!!.jsonPrimitive.content)
+                assertEquals("new", call["session_mode"]!!.jsonPrimitive.content)
+                assertTrue(call["client_call_id"]!!.jsonPrimitive.content.isNotBlank())
+                assertTrue("Every main button call gets a distinct new chat", newChats.add(chatId))
+                assertTrue(call["chat"]!!.jsonObject["client_session_id"]!!.jsonPrimitive.content.startsWith("pending:"))
+                waitForTag("call_agent", "Unknown provider")
+                waitForTag("call_status", context.getString(R.string.call_calling, if (callee == "codex") "Codex" else "Claude"))
+                waitForTag("call_model", "Model: Unknown model")
+                waitForTag("call_project", "Project: Unknown project")
+                screenshot("new-$callee-call")
+                agent("POST", "/v1/calls/$id/decline", """{"reason":"callee_unavailable"}""")
+                waitForTag("call_status", context.getString(R.string.call_unavailable))
+                assertEquals("callee_unavailable", agent("GET", "/v1/calls/$id")["end_reason"]!!.jsonPrimitive.content)
+                waitFor(what = "unavailable call closed without fallback") { Graph.calls.state.value == null }
+            }
+            val session = "call-routing-" + System.currentTimeMillis()
+            val existing = agent("POST", "/v1/chats", """{"client_session_id":"$session","callee":"codex","caller":{"provider":"OpenAI","model":"emulator-call-fixture","project":"Existing call routing fixture"}}""")
+            val chatId = existing["chat_id"]!!.jsonPrimitive.content
+            waitForTag("tab_messages")
+            compose.onNodeWithTag("tab_messages").performClick()
+            openChat(chatId)
+            waitForTag("message_input")
+            waitForText("Reply to OpenAI")
+            waitForTag("call_session")
+            screenshot("existing-session-call-button")
+            compose.onNodeWithTag("call_session").performClick()
+            var created: JsonObject? = null
+            waitFor(what = "existing chat Call button") {
+                created = agent("GET", "/v1/status")["active_call"] as? JsonObject
+                created != null
+            }
+            val call = created!!
+            val id = call["call_id"]!!.jsonPrimitive.content
+            assertEquals("existing", call["session_mode"]!!.jsonPrimitive.content)
+            assertEquals("codex", call["callee"]!!.jsonPrimitive.content)
+            assertEquals(chatId, call["chat_id"]!!.jsonPrimitive.content)
+            assertEquals(session, call["chat"]!!.jsonObject["client_session_id"]!!.jsonPrimitive.content)
+            waitForTag("call_agent", "OpenAI")
+            waitForTag("call_model", "Model: emulator-call-fixture")
+            waitForTag("call_project", "Project: Existing call routing fixture")
+            screenshot("existing-codex-call")
+            agent("POST", "/v1/calls/$id/decline", """{"reason":"callee_unavailable"}""")
+            waitForTag("call_status", context.getString(R.string.call_unavailable))
+            waitFor(what = "existing unavailable session closed without replacement") { Graph.calls.state.value == null }
+            assertEquals(session, agent("GET", "/v1/chats/$chatId")["client_session_id"]!!.jsonPrimitive.content)
+        } finally {
+            (agent("GET", "/v1/status")["active_call"] as? JsonObject)?.let { call -> agent("POST", "/v1/calls/${call["call_id"]!!.jsonPrimitive.content}/end", "{}") }
+            socket.stop()
+        }
     }
 
     private fun sha(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
@@ -336,6 +698,16 @@ class SessionMediaEndToEndTest {
         return uri
     }
 
+    private fun nativeRoots(): List<AccessibilityNodeInfo> {
+        val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
+        val info = automation.serviceInfo
+        if (info.flags and android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS == 0) {
+            info.flags = info.flags or android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            automation.serviceInfo = info
+        }
+        return automation.windows.mapNotNull { it.root } + listOfNotNull(automation.rootInActiveWindow)
+    }
+
     private fun nativeNode(text: String, substring: Boolean = false, ignoreCase: Boolean = false): AccessibilityNodeInfo? {
         fun walk(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
             if (node == null) return null
@@ -343,7 +715,7 @@ class SessionMediaEndToEndTest {
             for (i in 0 until node.childCount) walk(node.getChild(i))?.let { return it }
             return null
         }
-        return walk(InstrumentationRegistry.getInstrumentation().uiAutomation.rootInActiveWindow)
+        return nativeRoots().firstNotNullOfOrNull { walk(it) }
     }
 
     private fun nativeWait(text: String, substring: Boolean = false, ignoreCase: Boolean = false): AccessibilityNodeInfo {
@@ -371,7 +743,7 @@ class SessionMediaEndToEndTest {
             return null
         }
         var target: AccessibilityNodeInfo? = null
-        waitFor(what = "clickable native $text") { target = clickable(InstrumentationRegistry.getInstrumentation().uiAutomation.rootInActiveWindow); target != null }
+        waitFor(what = "clickable native $text") { target = nativeRoots().firstNotNullOfOrNull { clickable(it) }; target != null }
         assertTrue("Clickable native $text", target!!.performAction(AccessibilityNodeInfo.ACTION_CLICK))
     }
 }

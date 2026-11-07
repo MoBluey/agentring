@@ -115,7 +115,7 @@ def test_handshake_sessions_and_http_errors(relay: str, start):
     assert init["capabilities"] == {"tools": {"listChanged": False}}
     assert c.request("ping")["result"] == {}
     names = [t["name"] for t in c.request("tools/list")["result"]["tools"]]
-    assert names == ["send_message", "get_replies", "call", "status", "open_chat"]
+    assert names == ["send_message", "get_replies", "call", "status", "open_chat", "ask_question", "acknowledge_replies"]
     assert c.request("nope/method")["error"]["code"] == -32601
     assert c.request("tools/call", {"name": "nope"})["error"]["code"] == -32602
 

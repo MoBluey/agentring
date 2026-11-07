@@ -13,7 +13,7 @@ import websockets
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from . import __version__
-from .relay_client import RelayClient
+from .relay_client import RelayClient, RelayError
 from .store import Store
 
 log = logging.getLogger("agentring.sync")
@@ -31,14 +31,30 @@ def apply_event(store: Store, event: dict[str, Any]) -> None:
     t = event.get("type")
     if t == "msg.new":
         store.upsert_message(event["msg_id"], event["from"], event["text"], event["ts"], event.get("reply_to"),
-                             event.get("chat_id", "chat_default"), event.get("attachments", []))
+                             event.get("chat_id", "chat_default"), event.get("attachments", []),
+                             event.get("question"), event.get("answer"))
+    elif t == "question.answered":
+        store.mark_question_answered(event["question_id"], event["answer_msg_id"], event["answered_at"])
+    elif t == "msg.delivered":
+        store.mark_received(event["msg_id"], event["ts"])
     elif t == "chat.updated":
         store.upsert_chat(event["chat"])
     elif t == "msg.read":
         store.mark_read(event["msg_id"], event["ts"])
+        if event.get("by") == "agent":
+            store.mark_delivered([event["msg_id"]], event["ts"])
     seq = event.get("seq")
     if isinstance(seq, int):
         store.advance_seq(seq)
+
+
+def acknowledge_receipts(client: RelayClient, store: Store) -> None:
+    """Only persisted messages qualify. Failed acknowledgements remain pending for retry."""
+    for row in store.pending_receipts():
+        try:
+            client.mark_received(row["msg_id"])
+        except RelayError as e:
+            log.warning("message receipt remains pending: %s", e)
 
 
 def catch_up(client: RelayClient, store: Store) -> int:
@@ -51,6 +67,7 @@ def catch_up(client: RelayClient, store: Store) -> int:
             apply_event(store, ev)
             n += 1
         if not page["has_more"]:
+            acknowledge_receipts(client, store)
             return n
 
 
@@ -67,6 +84,7 @@ async def run_ws(
     backoff = 1.0
     headers = {"authorization": f"Bearer {api_key}", "user-agent": f"agentring-daemon/{__version__}"}
     while not stop.is_set():
+        await asyncio.to_thread(acknowledge_receipts, client, store)
         url = client.ws_url(store.last_seq)
         try:
             async with websockets.connect(url, additional_headers=headers, ping_interval=20, ping_timeout=20) as ws:
@@ -85,6 +103,8 @@ async def run_ws(
                             log.warning("relay identity changed; resyncing from scratch")
                             break
                         apply_event(store, event)
+                        if event.get("type") == "msg.new" and event.get("from") == "user":
+                            await asyncio.to_thread(acknowledge_receipts, client, store)
                         on_event(event)
                 finally:
                     stopper.cancel()

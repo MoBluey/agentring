@@ -41,9 +41,13 @@ data class CallInfo(
     val chatId: String = "chat_default",
     val chat: dev.agentring.core.Chat? = null,
 ) {
-    val callerLabel: String get() = chat?.caller?.label ?: "Unknown provider · Unknown model · Unknown project"
-    val displayName: String get() = chat?.title ?: agentName
-    val notificationText: String get() = "$callerLabel · $reason"
+    private val callerContext get() = chat?.caller ?: dev.agentring.core.CallerContext()
+    val callerLabel: String get() = callerContext.label
+    val modelLine: String get() = callerContext.modelLine
+    val projectLine: String get() = callerContext.projectLine
+    val displayName: String get() = chat?.displayTitle(agentName) ?: callerContext.title(agentName)
+    val targetName: String get() = when (chat?.callee) { "claude" -> "Claude"; "codex" -> "Codex"; else -> displayName }
+    val notificationText: String get() = if (reason.isBlank()) callerLabel else "$callerLabel\n$reason"
     companion object {
         fun of(call: Call) = CallInfo(call.callId, call.agentName, call.reason.orEmpty(), call.priority == "urgent", expiresAt = 0, chatId = call.chatId, chat = call.chat)
     }
@@ -106,6 +110,7 @@ class CallManager(private val context: Context) : TelecomBridge.Listener {
     private val callJobs = mutableListOf<Job>()
     /** Outgoing call: this phone is in the LiveKit room. */
     private var inRoom = false
+    private val callAttempt = dev.agentring.core.MessageSendAttempt()
 
     private val _joinable = MutableStateFlow<JoinOffer?>(null)
 
@@ -184,7 +189,7 @@ class CallManager(private val context: Context) : TelecomBridge.Listener {
                 if (call?.isJoinable == true) offerJoin(call) else CallNotifications.showMissed(context, info)
             }
         }
-        telecomActive = Graph.settings.useTelecom && telecom.addIncoming(info.agentName, info.callId, this)
+        telecomActive = Graph.settings.useTelecom && telecom.addIncoming(info.displayName, info.callId, this)
         Log.i(TAG, "telecom: $telecomActive")
         if (!isCurrent(info.callId)) return
         // Build the WebRTC stack and warm the connection while the user decides.
@@ -246,7 +251,7 @@ class CallManager(private val context: Context) : TelecomBridge.Listener {
         scope.launch {
             val request = async(Dispatchers.IO) { runCatching { Graph.api()!!.joinCall(info.callId).join } }
             val stillJoining = { isCurrent(info.callId) && _state.value is CallUi.Connecting }
-            val added = Graph.settings.useTelecom && telecom.addOutgoing(info.agentName, info.callId, this@CallManager)
+            val added = Graph.settings.useTelecom && telecom.addOutgoing(info.displayName, info.callId, this@CallManager)
             if (added && !stillJoining()) {
                 // Hung up while Telecom was adding the call: don't leave a ghost call behind.
                 telecom.disconnect(DisconnectCause.LOCAL)
@@ -298,7 +303,7 @@ class CallManager(private val context: Context) : TelecomBridge.Listener {
         if (!isCurrent(info.callId)) return
         inRoom = true
         when (_state.value) {
-            is CallUi.Connecting -> goActive(info)
+            is CallUi.Connecting -> goActive(_state.value?.info ?: info)
             // Calling the agent: stay "Calling…" until it picks up, unless it already did.
             is CallUi.Outgoing -> if (s.agentInRoom.value) onAgentAnswered(info.callId)
             else -> Unit
@@ -317,24 +322,29 @@ class CallManager(private val context: Context) : TelecomBridge.Listener {
      * microphone foreground service). Returns null once the call is ringing (open
      * [CallActivity]), or a message to show when it could not be placed.
      */
-    suspend fun callAgent(): Int? {
+    suspend fun callAgent(callee: String? = null, chatId: String? = null): Int? {
         val cur = _state.value
         if (cur != null && cur !is CallUi.Ended) return if (cur is CallUi.Outgoing || cur is CallUi.Active) null else R.string.call_agent_busy
+        val attempt = callAttempt.forPayload("$callee|$chatId", null)
         val created = try {
-            withContext(Dispatchers.IO) { Graph.api()!!.createCall() }
+            withContext(Dispatchers.IO) { Graph.api()!!.createCall(callee = callee, chatId = chatId, sessionMode = if (chatId == null) "new" else "existing", clientCallId = attempt.clientMsgId) }
         } catch (e: RelayException) {
             Log.w(TAG, "create call failed: ${e.status} ${e.code}")
+            if (e.status in 400..499) callAttempt.reset()
             return when (e.code) {
                 "agent_offline" -> R.string.call_agent_offline
                 "busy" -> R.string.call_agent_busy
                 "calls_unavailable" -> R.string.call_agent_unavailable
+                "invalid_state", "call_ended" -> R.string.call_unavailable
                 else -> R.string.call_failed
             }
         } catch (e: Exception) {
             Log.w(TAG, "create call failed", e)
             return R.string.call_failed
         }
+        callAttempt.reset()
         val call = created.call
+        call.chat?.let(Graph.messages::upsertChat)
         val info = CallInfo.of(call)
         synchronized(seen) { seen.add(call.callId) }
         _state.value.let {
@@ -351,7 +361,7 @@ class CallManager(private val context: Context) : TelecomBridge.Listener {
         Log.i(TAG, "calling the agent: ${call.callId}")
         scope.launch {
             val stillCalling = { isCurrent(info.callId) && _state.value !is CallUi.Ended }
-            val added = Graph.settings.useTelecom && telecom.addOutgoing(info.agentName, info.callId, this@CallManager)
+            val added = Graph.settings.useTelecom && telecom.addOutgoing(info.displayName, info.callId, this@CallManager)
             if (!stillCalling()) {
                 if (added) telecom.disconnect(DisconnectCause.LOCAL) // hung up while Telecom was adding the call
                 return@launch
@@ -381,17 +391,35 @@ class CallManager(private val context: Context) : TelecomBridge.Listener {
                 return
             }
             val call = withContext(Dispatchers.IO) { runCatching { Graph.api()?.getCall(info.callId) }.getOrNull() } ?: continue
-            onOutgoingState(info.callId, call.state)
+            updateCallMetadata(call)
+            onOutgoingState(info.callId, call.state, call.endReason)
         }
     }
 
     /** The relay's state of the call we placed. */
-    private fun onOutgoingState(callId: String, state: String) {
+    private fun updateCallMetadata(call: Call) { call.chat?.let { updateCallMetadata(call.callId, it) } }
+
+    private fun updateCallMetadata(callId: String, chat: dev.agentring.core.Chat) {
+        val current = _state.value ?: return
+        if (current.info.callId != callId || current is CallUi.Ended) return
+        Graph.messages.upsertChat(chat)
+        val info = current.info.copy(chatId = chat.chatId, chat = chat)
+        _state.value = when (current) {
+            is CallUi.Incoming -> current.copy(info = info)
+            is CallUi.Outgoing -> current.copy(info = info)
+            is CallUi.Connecting -> current.copy(info = info)
+            is CallUi.Active -> current.copy(info = info)
+            is CallUi.Ended -> current
+        }
+        CallService.refresh()
+    }
+
+    private fun onOutgoingState(callId: String, state: String, reason: String? = null) {
         val cur = _state.value
         if (cur?.info?.callId != callId || cur is CallUi.Ended) return
         when (state) {
             "active" -> onAgentAnswered(callId)
-            "declined" -> finish(cur.info, R.string.call_agent_declined, DisconnectCause.REJECTED)
+            "declined" -> finish(cur.info, if (reason == "callee_unavailable") R.string.call_unavailable else R.string.call_agent_declined, DisconnectCause.REJECTED)
             "missed" -> finish(cur.info, R.string.call_agent_no_answer, DisconnectCause.MISSED)
             "canceled", "ended" -> finish(cur.info, R.string.call_ended, DisconnectCause.REMOTE)
         }
@@ -400,6 +428,10 @@ class CallManager(private val context: Context) : TelecomBridge.Listener {
     private fun onAgentAnswered(callId: String) {
         val cur = _state.value as? CallUi.Outgoing ?: return
         if (cur.info.callId != callId) return
+        // A new-session call starts with honest unknown model/project until the provider binds it.
+        scope.launch {
+            withContext(Dispatchers.IO) { runCatching { Graph.api()?.getCall(callId) }.getOrNull() }?.let(::updateCallMetadata)
+        }
         Log.i(TAG, "the agent answered $callId")
         if (telecomActive) telecom.activate()
         // Not in the room yet: connect() finishes the switch to Active.
@@ -462,6 +494,7 @@ class CallManager(private val context: Context) : TelecomBridge.Listener {
     /** Relay events (push or WebSocket) about a call we may be showing or may join. */
     fun onCallEvent(event: Event) {
         scope.launch {
+            if (event is Event.CallAnswer) event.chat?.let { updateCallMetadata(event.callId, it) }
             when (event) {
                 is Event.CallEnd -> if (_joinable.value?.info?.callId == event.callId) _joinable.value = null
                 is Event.CallMissed -> if (_joinable.value?.info?.callId == event.callId) _joinable.value = null
@@ -479,7 +512,7 @@ class CallManager(private val context: Context) : TelecomBridge.Listener {
             val info = cur.info
             if (cur is CallUi.Outgoing) {
                 if (event is Event.CallAnswer && event.callId == info.callId) {
-                    onOutgoingState(info.callId, if (event.type == "call.accept") "active" else "declined")
+                    onOutgoingState(info.callId, if (event.type == "call.accept") "active" else "declined", event.reason)
                 } else if (event is Event.CallMissed && event.callId == info.callId) {
                     onOutgoingState(info.callId, "missed")
                 } else if (event is Event.CallEnd && event.callId == info.callId) {

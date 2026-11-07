@@ -69,14 +69,17 @@ def test_m1_flow(relay: str, agentring_home):
     assert [r["text"] for r in replies] == ["¡hola agente!"]
     assert replies[0]["reply_to"] == msg_id
 
-    # Already seen → no new replies; --all still shows it.
+    assert "read_at" not in httpx.get(f"{relay}/v1/messages/{replies[0]['msg_id']}", headers=phone["headers"]).json()
+    cli("acknowledge-replies", replies[0]["msg_id"], "--json")
+
+    # Already fetched → no new replies; --all still shows it.
     assert json.loads(cli("replies", "--json"))["replies"] == []
     assert len(json.loads(cli("replies", "--all", "--json"))["replies"]) == 1
     assert len(json.loads(cli("replies", "--since", "5m", "--json"))["replies"]) == 1
 
     # The agent marked it read on the relay → the phone gets a read receipt.
     events = httpx.get(f"{relay}/v1/events", headers=phone["headers"]).json()["events"]
-    assert [e["type"] for e in events] == ["msg.new", "msg.read", "msg.new", "msg.read"]
+    assert [e["type"] for e in events] == ["msg.new", "msg.delivered", "msg.read", "msg.new", "msg.delivered", "msg.read"]
     assert events[-1]["by"] == "agent"
 
     # Human-readable output works too.

@@ -1,0 +1,1 @@
+{"type": "msg.new", "id": "evt_01JB0000000000000000000020", "ts": 1761200000000, "seq": 48, "msg_id": "msg_01JB0000000000000000000020", "from": "agent", "text": "**Deploy?**", "chat_id": "chat_default", "question": {"options": [{"id": "ship", "label": "Ship it"}, {"id": "hold", "label": "Hold"}], "allow_free_text": true}}

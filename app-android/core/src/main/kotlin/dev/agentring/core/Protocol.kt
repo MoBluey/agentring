@@ -71,7 +71,11 @@ data class PairResponse(
 
 @Serializable
 data class CallerContext(val provider: String? = null, val model: String? = null, val project: String? = null) {
-    val label: String get() = listOf(provider ?: "Unknown provider", model ?: "Unknown model", project ?: "Unknown project").joinToString(" · ")
+    fun title(legacyName: String): String = provider?.takeIf { it.isNotBlank() }
+        ?: legacyName.takeIf { it.isNotBlank() } ?: "Unknown provider"
+    val modelLine: String get() = "Model: ${model?.takeIf { it.isNotBlank() } ?: "Unknown model"}"
+    val projectLine: String get() = "Project: ${project?.takeIf { it.isNotBlank() } ?: "Unknown project"}"
+    val label: String get() = "$modelLine\n$projectLine"
 }
 
 @Serializable
@@ -81,9 +85,13 @@ data class Chat(
     val title: String,
     val description: String = "",
     val caller: CallerContext = CallerContext(),
+    val callee: String? = null,
     @SerialName("created_at") val createdAt: Long,
     @SerialName("updated_at") val updatedAt: Long,
-)
+) {
+    /** A pending new call has no verified caller yet; it must not inherit the legacy relay name. */
+    fun displayTitle(legacyName: String): String = caller.title(if (clientSessionId.startsWith("pending:")) "" else legacyName)
+}
 
 @Serializable
 data class ChatPage(val chats: List<Chat>)
@@ -100,6 +108,24 @@ data class Attachment(
 )
 
 @Serializable
+data class QuestionOption(val id: String, val label: String)
+
+@Serializable
+data class Question(
+    val options: List<QuestionOption>,
+    @SerialName("allow_free_text") val allowFreeText: Boolean = false,
+    @SerialName("answered_by_msg_id") val answeredByMsgId: String? = null,
+    @SerialName("answered_at") val answeredAt: Long? = null,
+)
+
+@Serializable
+data class QuestionAnswer(
+    @SerialName("question_id") val questionId: String,
+    @SerialName("option_id") val optionId: String? = null,
+    @SerialName("free_text") val freeText: String? = null,
+)
+
+@Serializable
 data class Message(
     @SerialName("msg_id") val msgId: String,
     val from: String,
@@ -110,6 +136,9 @@ data class Message(
     @SerialName("created_at") val createdAt: Long,
     @SerialName("read_at") val readAt: Long? = null,
     val attachments: List<Attachment> = emptyList(),
+    val question: Question? = null,
+    val answer: QuestionAnswer? = null,
+    @SerialName("delivered_at") val deliveredAt: Long? = null,
     @SerialName("chat_id") val chatId: String = "chat_default",
 ) {
     val fromAgent: Boolean get() = from == FROM_AGENT
@@ -210,6 +239,9 @@ sealed interface Event {
         override val type: String, override val id: String, override val ts: Long, override val seq: Long? = null,
         @SerialName("call_id") val callId: String,
         val by: String,
+        val reason: String? = null,
+        val chat: Chat? = null,
+        @SerialName("chat_id") val chatId: String? = null,
         @SerialName("device_id") val deviceId: String? = null,
     ) : Event
 
@@ -236,10 +268,12 @@ sealed interface Event {
         val text: String,
         @SerialName("reply_to") val replyTo: String? = null,
         val truncated: Boolean? = null,
+        val question: Question? = null,
+        val answer: QuestionAnswer? = null,
         val attachments: List<Attachment> = emptyList(),
         @SerialName("chat_id") val chatId: String = "chat_default",
     ) : Event {
-        fun toMessage() = Message(msgId = msgId, from = from, text = text, replyTo = replyTo, createdAt = ts, attachments = attachments, chatId = chatId)
+        fun toMessage() = Message(msgId = msgId, from = from, text = text, replyTo = replyTo, createdAt = ts, attachments = attachments, chatId = chatId, question = question, answer = answer)
     }
 
     @Serializable
@@ -253,6 +287,22 @@ sealed interface Event {
         override val type: String, override val id: String, override val ts: Long, override val seq: Long? = null,
         @SerialName("msg_id") val msgId: String,
         val by: String,
+    ) : Event
+
+    @Serializable
+    data class MsgDelivered(
+        override val type: String, override val id: String, override val ts: Long, override val seq: Long? = null,
+        @SerialName("msg_id") val msgId: String,
+        val by: String,
+    ) : Event
+
+    @Serializable
+    data class QuestionAnswered(
+        override val type: String, override val id: String, override val ts: Long, override val seq: Long? = null,
+        @SerialName("chat_id") val chatId: String,
+        @SerialName("question_id") val questionId: String,
+        @SerialName("answer_msg_id") val answerMsgId: String,
+        @SerialName("answered_at") val answeredAt: Long,
     ) : Event
 
     @Serializable
@@ -288,6 +338,8 @@ sealed interface Event {
                 "call.missed" -> j.decodeFromJsonElement(CallMissed.serializer(), obj)
                 "msg.new" -> j.decodeFromJsonElement(MsgNew.serializer(), obj)
                 "chat.updated" -> j.decodeFromJsonElement(ChatUpdated.serializer(), obj)
+                "msg.delivered" -> j.decodeFromJsonElement(MsgDelivered.serializer(), obj)
+                "question.answered" -> j.decodeFromJsonElement(QuestionAnswered.serializer(), obj)
                 "msg.read" -> j.decodeFromJsonElement(MsgRead.serializer(), obj)
                 "agent.presence" -> j.decodeFromJsonElement(AgentPresence.serializer(), obj)
                 "ws.hello" -> j.decodeFromJsonElement(WsHello.serializer(), obj)
