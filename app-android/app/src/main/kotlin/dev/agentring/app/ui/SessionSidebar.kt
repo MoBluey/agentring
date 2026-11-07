@@ -123,7 +123,15 @@ internal fun SessionSidebar(pairing: Pairing, chats: List<Chat>, messages: List<
             Text("Could not load sessions: ${browser.error}", Modifier.padding(12.dp).testTag("session_search_error"), color = MaterialTheme.colorScheme.error)
             TextButton(onClick = { browser.revision++ }, modifier = Modifier.testTag("retry_session_search")) { Text("Retry") }
         } else if (browser.results.isEmpty()) {
-            Text(if (browser.query.isNotBlank()) "No matching sessions" else "No ${browser.status.takeUnless { it == "all" }?.plus(" ").orEmpty()}sessions", Modifier.padding(16.dp).testTag("session_search_empty"))
+            val empty = if (browser.query.isBlank()) "No ${browser.status.takeUnless { it == "all" }?.plus(" ").orEmpty()}sessions" else when (browser.status) {
+                "active" -> "No matches in active sessions. Archived sessions are excluded."
+                "archived" -> "No matches in archived sessions. Active sessions are excluded."
+                else -> "No matches in all sessions."
+            }
+            Text(empty, Modifier.padding(16.dp).testTag("session_search_empty"))
+            if (browser.query.isNotBlank() && browser.status != "all") {
+                TextButton(onClick = { browser.status = "all" }, modifier = Modifier.padding(horizontal = 8.dp).testTag("search_all_sessions")) { Text("Search all sessions") }
+            }
         }
         LazyColumn(Modifier.weight(1f).fillMaxWidth().testTag("chat_list")) {
             items(browser.results, key = { it.chat.chatId }) { result ->

@@ -211,6 +211,7 @@ private fun ConversationScreen(pairing: Pairing, chat: Chat, visible: Boolean, f
                 Text(chat.displayTitle(pairing.agentName), style = MaterialTheme.typography.titleMedium, modifier = Modifier.testTag("chat_provider"))
                 Text(chat.caller.modelLine, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("chat_model"))
                 Text(chat.caller.projectLine, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("chat_project"))
+                if (chat.archivedAt != null) Text("Archived session", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("chat_archived"))
             }
             val relay by Graph.connection.relayState.collectAsStateWithLifecycle()
             val revoked by Graph.pairing.revoked.collectAsStateWithLifecycle()

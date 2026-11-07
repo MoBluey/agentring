@@ -513,6 +513,66 @@ class SessionMediaEndToEndTest {
         verifyCallSelection()
     }
 
+    @Test
+    fun archivedSearchScopeOffersExplicitAllAndKeepsDraft() {
+        val chatId = args.getString("scopeChatId")!!
+        val oldId = args.getString("scopeMessageId")!!
+        val query = args.getString("scopeQuery")!!
+        val provider = args.getString("scopeProvider")!!
+        val size = Regex("Override size: ([0-9]+x[0-9]+)").find(shell("wm size"))?.groupValues?.get(1) ?: "reset"
+        val density = Regex("Override density: ([0-9]+)").find(shell("wm density"))?.groupValues?.get(1) ?: "reset"
+        waitForTag("relay_status", context.getString(R.string.connected), timeoutMs = 30_000)
+        try {
+            shell("wm size 1500x1800"); shell("wm density 320")
+            waitForTag("tab_messages", timeoutMs = 30_000)
+            compose.onNodeWithTag("tab_messages").performClick()
+            compose.onNodeWithTag("sessions_status_archived").performClick()
+            openChat(chatId)
+            waitForTag("chat_archived", "Archived session")
+            waitForTag("chat_provider", provider)
+            waitForTag("chat_model"); waitForTag("chat_project")
+            val draft = "Draft kept while broadening search scope"
+            compose.onNodeWithTag("message_input").performTextInput(draft)
+            screenshot("archive-scope-selected-label")
+            compose.onNodeWithTag("sessions_status_active").performClick()
+            compose.onNodeWithTag("sessions_provider").performClick()
+            compose.onNodeWithTag("provider_$provider").performClick()
+            compose.onNodeWithTag("session_search").performTextReplacement(query)
+            waitForTag("session_search_empty", "No matches in active sessions. Archived sessions are excluded.")
+            waitForTag("search_all_sessions", "Search all sessions")
+            assertTrue(compose.onAllNodes(hasTestTag("chat_$chatId")).fetchSemanticsNodes().isEmpty())
+            waitForTag("chat_archived", "Archived session")
+            screenshot("archive-scope-active-empty")
+            compose.onNodeWithTag("search_all_sessions").performClick()
+            waitForTag("sessions_provider", "Provider: $provider")
+            waitForTag("session_search", query)
+            waitForTag("search_snippet_$chatId", query)
+            screenshot("archive-scope-all-hit")
+            compose.onNodeWithTag("chat_$chatId").performClick()
+            waitForTag("message_text_${oldId}_0", query)
+            compose.waitForIdle()
+            assertTrue("All action opens the exact old matching message", compose.onNodeWithTag("message_text_${oldId}_0").isDisplayed())
+            waitForTag("message_input", draft)
+            waitForTag("chat_archived", "Archived session")
+            compose.onNodeWithTag("sessions_status_archived").performClick()
+            val missing = "absent-scope-query-" + System.currentTimeMillis()
+            compose.onNodeWithTag("session_search").performTextReplacement(missing)
+            waitForTag("session_search_empty", "No matches in archived sessions. Active sessions are excluded.")
+            compose.onNodeWithTag("search_all_sessions").performClick()
+            waitForTag("session_search_empty", "No matches in all sessions.")
+            waitForTag("session_search", missing)
+            waitForTag("sessions_provider", "Provider: $provider")
+            assertTrue(compose.onAllNodes(hasTestTag("search_all_sessions")).fetchSemanticsNodes().isEmpty())
+            compose.onNodeWithTag("session_search").performTextReplacement(query)
+            waitForTag("search_snippet_$chatId", query)
+            compose.onNodeWithTag("chat_$chatId").performClick()
+            waitForTag("message_input", draft)
+            waitForTag("message_text_${oldId}_0", query)
+            assertTrue(agent("GET", "/v1/chats/$chatId")["archived_at"] != null)
+            screenshot("archive-scope-selected-result")
+        } finally { shell("wm size $size"); shell("wm density $density") }
+    }
+
     /** One real unowned existing-session call must be unavailable, not labelled expired. */
     @Test
     fun unavailableSessionOwnerShowsHonestCallReason() {
