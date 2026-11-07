@@ -88,6 +88,7 @@ data class Chat(
     val callee: String? = null,
     @SerialName("created_at") val createdAt: Long,
     @SerialName("updated_at") val updatedAt: Long,
+    @SerialName("archived_at") val archivedAt: Long? = null,
 ) {
     /** A pending new call has no verified caller yet; it must not inherit the legacy relay name. */
     fun displayTitle(legacyName: String): String = caller.title(if (clientSessionId.startsWith("pending:")) "" else legacyName)
@@ -110,6 +111,20 @@ data class Chat(
 
 @Serializable
 data class ChatPage(val chats: List<Chat>)
+
+@Serializable
+data class ChatSearchMatch(
+    val kind: String,
+    val snippet: String,
+    @SerialName("msg_id") val msgId: String? = null,
+    @SerialName("created_at") val createdAt: Long? = null,
+)
+
+@Serializable
+data class ChatSearchResult(val chat: Chat, val match: ChatSearchMatch)
+
+@Serializable
+data class ChatSearchPage(val results: List<ChatSearchResult>)
 
 @Serializable
 data class Attachment(

@@ -90,6 +90,7 @@
     <string name="call_declined">Call declined</string>
     <string name="call_missed">Missed call</string>
     <string name="call_missed_from">Missed call from %1$s</string>
+    <string name="call_callee_unavailable">This agent cannot answer a call right now</string>
     <string name="call_unavailable">This call is no longer available</string>
     <string name="call_answered_elsewhere">Answered on another device</string>
     <string name="call_failed">Couldn\'t connect the call</string>

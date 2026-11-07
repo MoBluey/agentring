@@ -419,7 +419,7 @@ class CallManager(private val context: Context) : TelecomBridge.Listener {
         if (cur?.info?.callId != callId || cur is CallUi.Ended) return
         when (state) {
             "active" -> onAgentAnswered(callId)
-            "declined" -> finish(cur.info, if (reason == "callee_unavailable") R.string.call_unavailable else R.string.call_agent_declined, DisconnectCause.REJECTED)
+            "declined" -> finish(cur.info, if (reason == "callee_unavailable") R.string.call_callee_unavailable else R.string.call_agent_declined, DisconnectCause.REJECTED)
             "missed" -> finish(cur.info, R.string.call_agent_no_answer, DisconnectCause.MISSED)
             "canceled", "ended" -> finish(cur.info, R.string.call_ended, DisconnectCause.REMOTE)
         }

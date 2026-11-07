@@ -99,6 +99,19 @@ describe("hub mode", () => {
     expect(msgsA.json.messages.map((m: { text: string }) => m.text)).toEqual(["hi A"]);
   });
 
+  it("keeps archive mutations and history search inside their authenticated tenant", async () => {
+    const a = await createTenant(), b = await createTenant();
+    const chat = (await http("POST", `/t/${a.tid}/v1/chats`, a.auth, { client_session_id: "private-search", title: "Private needle" })).json;
+    await http("POST", `/t/${a.tid}/v1/messages`, a.auth, { text: "Tenant-only needle", chat_id: chat.chat_id });
+    const device = await pair(a.tid);
+    expect((await http("PATCH", `/t/${b.tid}/v1/chats/${chat.chat_id}`, b.auth, { archived: true })).status).toBe(404);
+    expect((await http("PATCH", `/t/${b.tid}/v1/chats/${chat.chat_id}`, device.headers, { archived: true })).status).toBe(401);
+    expect((await http("GET", `/t/${b.tid}/v1/chats/search?q=needle`, b.auth)).json.results).toEqual([]);
+    expect((await http("GET", `/t/${a.tid}/v1/chats/search?q=needle`, device.headers)).json.results[0].chat.chat_id).toBe(chat.chat_id);
+    expect((await http("PATCH", `/t/${a.tid}/v1/chats/${chat.chat_id}`, device.headers, { archived: true })).status).toBe(200);
+    expect((await http("GET", `/t/${a.tid}/v1/chats?status=archived`, a.auth)).json.chats[0].chat_id).toBe(chat.chat_id);
+  });
+
   it("answers 404 for unknown tenants and for the tenant-less API", async () => {
     expect((await http("GET", "/t/tnt_00000000000000000000000000/v1/status")).json.error.code).toBe("not_found");
     expect((await http("GET", "/v1/status")).status).toBe(404);

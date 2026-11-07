@@ -17,6 +17,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextReplacement
 import androidx.core.app.RemoteInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -76,7 +77,7 @@ class SessionMediaEndToEndTest {
         @JvmStatic
         fun resetApp() {
             // Start from a fresh install state.
-            Graph.unpair()
+            if (args.getString("preservePairing") != "true") Graph.unpair()
         }
     }
 
@@ -119,10 +120,10 @@ class SessionMediaEndToEndTest {
     private fun waitForTag(tag: String, text: String? = null, timeoutMs: Long = 15_000) {
         if (tag.startsWith("chat_chat_")) {
             compose.waitUntil(timeoutMs) { Graph.messages.chats.value.any { "chat_${it.chatId}" == tag } }
-            compose.onNodeWithTag("chat_list").performScrollToNode(hasTestTag(tag))
+            compose.waitUntil(timeoutMs) { runCatching { compose.onNodeWithTag("chat_list").performScrollToNode(hasTestTag(tag)); true }.getOrDefault(false) }
         }
         val matcher = if (text == null) hasTestTag(tag) else hasTestTag(tag).and(hasText(text, substring = true))
-        try { compose.waitUntil(timeoutMs) { runCatching { compose.onAllNodes(matcher).fetchSemanticsNodes().isNotEmpty() }.getOrDefault(false) } }
+        try { compose.waitUntil(timeoutMs) { runCatching { compose.onAllNodes(matcher, useUnmergedTree = tag.startsWith("search_snippet_")).fetchSemanticsNodes().isNotEmpty() }.getOrDefault(false) } }
         catch (e: Throwable) { println(compose.onRoot(useUnmergedTree = true).printToString()); println("WAIT_DIAGNOSTIC tag=$tag chats=${Graph.messages.chats.value.map { it.chatId }} messages=${Graph.messages.messages.value.size} seq=${Graph.messages.lastSeq} foreground=${dev.agentring.app.ui.AppVisibility.isForeground} socket=${Graph.connection.relayState.value}"); screenshot("session-failure-$tag"); throw e }
     }
 
@@ -512,6 +513,208 @@ class SessionMediaEndToEndTest {
         verifyCallSelection()
     }
 
+    /** One real unowned existing-session call must be unavailable, not labelled expired. */
+    @Test
+    fun unavailableSessionOwnerShowsHonestCallReason() {
+        waitForTag("relay_status", context.getString(R.string.connected), timeoutMs = 30_000)
+        val session = agent("POST", "/v1/chats", """{"client_session_id":"android-unowned-session-fixture-${System.currentTimeMillis()}","title":"Unavailable owner fixture","callee":"codex","caller":{"provider":"Codex","model":"unowned-session-fixture","project":"Call reason check"}}""")
+        val chatId = session["chat_id"]!!.jsonPrimitive.content
+        compose.onNodeWithTag("tab_messages").performClick()
+        openChat(chatId)
+        waitForTag("call_session")
+        try {
+            compose.onNodeWithTag("call_session").performClick()
+            waitForTag("call_status", context.getString(R.string.call_callee_unavailable), timeoutMs = 30_000)
+            val callId = Graph.calls.state.value!!.info.callId
+            assertEquals("callee_unavailable", agent("GET", "/v1/calls/$callId")["end_reason"]!!.jsonPrimitive.content)
+            assertTrue(context.getString(R.string.call_callee_unavailable) != context.getString(R.string.call_unavailable))
+            screenshot("session-call-owner-unavailable")
+            waitFor(what = "unavailable existing-session call cleaned up") { Graph.calls.state.value == null }
+        } finally {
+            (agent("GET", "/v1/status")["active_call"] as? JsonObject)?.let { agent("POST", "/v1/calls/${it["call_id"]!!.jsonPrimitive.content}/end", "{}") }
+        }
+    }
+
+    /** Phase one leaves an actually archived chat and a cache that has evicted its old read message. */
+    @Test
+    fun sessionArchiveFiltersAndDrafts() {
+        val firstId = args.getString("searchChatId")!!
+        val secondId = args.getString("searchOtherChatId")!!
+        val oldId = args.getString("searchMessageId")!!
+        val literal = args.getString("searchLiteral")!!
+        val titleQuery = args.getString("searchTitle")!!
+        val otherMessageId = args.getString("searchOtherMessageId")!!
+        val size = Regex("Override size: ([0-9]+x[0-9]+)").find(shell("wm size"))?.groupValues?.get(1) ?: "reset"
+        val density = Regex("Override density: ([0-9]+)").find(shell("wm density"))?.groupValues?.get(1) ?: "reset"
+        pairNormally()
+        waitForTag("agent_name", "AgentRing")
+        compose.onNodeWithTag("tab_messages").performClick()
+        openChat(firstId)
+        waitForTag("message_input")
+        waitForTag("session_voice_unavailable", "Voice calls to this session are not connected yet")
+        assertTrue(compose.onNodeWithTag("call_session").fetchSemanticsNode().config.contains(androidx.compose.ui.semantics.SemanticsProperties.Disabled))
+        waitFor(what = "old message read by actual visible conversation") { agent("GET", "/v1/messages/$oldId")["read_at"] != null }
+        val draft = "Codex draft survives archive and filters"
+        compose.onNodeWithTag("message_input").performTextInput(draft)
+        try {
+            compose.onNodeWithTag("back_chats").performClick(); compose.waitForIdle()
+            compose.onNodeWithTag("sessions_provider").performClick()
+            waitForTag("provider_OpenAI / Codex")
+            compose.onNodeWithTag("provider_OpenAI / Codex").performClick()
+            compose.onNodeWithTag("session_search").performTextReplacement(titleQuery)
+            waitForTag("search_snippet_$firstId", titleQuery)
+            val title = compose.onNodeWithTag("search_snippet_$firstId", useUnmergedTree = true).fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.Text].single()
+            assertTrue("Matching suggestion visibly styled", title.spanStyles.isNotEmpty())
+            screenshot("session-search-title")
+            // Rapid edits plus a provider change must finish on the latest filter, without stale results.
+            compose.onNodeWithTag("session_search").performTextReplacement("no-match-before-latest")
+            compose.onNodeWithTag("session_search").performTextReplacement(literal)
+            compose.onNodeWithTag("sessions_provider").performClick()
+            compose.onNodeWithTag("provider_Claude Code").performClick()
+            waitForTag("search_snippet_$secondId", literal)
+            compose.onNodeWithTag("sessions_provider").performClick()
+            compose.onNodeWithTag("provider_OpenAI / Codex").performClick()
+            waitForTag("search_snippet_$firstId", literal)
+            assertTrue(compose.onAllNodes(hasTestTag("chat_$secondId")).fetchSemanticsNodes().isEmpty())
+            assertTrue("Search does not read the other matching chat", agent("GET", "/v1/messages/$otherMessageId")["read_at"] == null)
+            screenshot("session-search-literal-provider")
+            compose.onNodeWithTag("chat_$firstId").performClick()
+            waitForTag("message_input", draft)
+            waitForTag("message_text_${oldId}_0", literal)
+            shell("wm size 1500x1800"); shell("wm density 320")
+            waitForTag("message_input", draft, timeoutMs = 30_000)
+            waitForTag("sessions_sidebar")
+            waitForTag("search_snippet_$firstId", literal)
+            val side = compose.onNodeWithTag("sessions_sidebar").fetchSemanticsNode().boundsInRoot
+            val pane = compose.onNodeWithTag("conversation_pane").fetchSemanticsNode().boundsInRoot
+            assertTrue(pane.left >= side.right - 2)
+            compose.onNodeWithTag("archive_$firstId").performScrollTo().performClick()
+            waitFor(what = "server archive persisted") { agent("GET", "/v1/chats/$firstId")["archived_at"] != null }
+            waitForTag("session_search_empty")
+            waitForTag("message_input", draft)
+            compose.onNodeWithTag("sessions_status_archived").performClick()
+            waitForTag("chat_$firstId")
+            waitForTag("archive_$firstId", "Unarchive")
+            screenshot("session-archived-wide-draft")
+            compose.onNodeWithTag("archive_$firstId").performScrollTo().performClick()
+            waitFor(what = "server unarchive reversible") { agent("GET", "/v1/chats/$firstId")["archived_at"] == null }
+            waitForTag("session_search_empty")
+            waitForTag("message_input", draft)
+            compose.onNodeWithTag("sessions_status_active").performClick()
+            waitForTag("chat_$firstId")
+            compose.onNodeWithTag("archive_$firstId").performScrollTo().performClick()
+            waitFor(what = "archive kept for actual process restart") { agent("GET", "/v1/chats/$firstId")["archived_at"] != null }
+            compose.onNodeWithTag("sessions_status_all").performClick()
+            compose.onNodeWithTag("clear_session_search").performClick()
+            compose.onNodeWithTag("sessions_provider").performClick()
+            compose.onNodeWithTag("provider_all").performClick()
+            openChat(secondId)
+            val otherDraft = "Claude draft stays separate"
+            compose.onNodeWithTag("message_input").performTextInput(otherDraft)
+            openChat(firstId)
+            waitForTag("message_input", draft)
+            openChat(secondId)
+            waitForTag("message_input", otherDraft)
+            openChat(firstId)
+            shell("wm size $size"); shell("wm density $density")
+            waitForTag("message_input", draft, timeoutMs = 30_000)
+            screenshot("session-search-restored-narrow-draft")
+            var latestInFirst = ""
+            repeat(30) { index -> latestInFirst = Graph.api()!!.postMessage("Recent session text $index", clientMsgId = java.util.UUID.randomUUID().toString(), chatId = firstId).msgId }
+            val filler = agent("POST", "/v1/chats", """{"client_session_id":"search-history-${System.currentTimeMillis()}","title":"Unread history fixture","caller":{"provider":"Claude Code","model":"search-history-fixture","project":"Unread fixture"}}""")["chat_id"]!!.jsonPrimitive.content
+            val unread = agent("POST", "/v1/messages", """{"chat_id":"$filler","text":"Keep this unrelated chat unread"}""")["msg_id"]!!.jsonPrimitive.content
+            var last = ""
+            // Real device REST -> relay -> normal WS consumer, never seeding the repository/cache.
+            repeat(505) { index -> last = Graph.api()!!.postMessage("History filler $index", clientMsgId = java.util.UUID.randomUUID().toString(), chatId = filler).msgId }
+            waitFor(timeoutMs = 60_000, what = "WS persisted messages beyond the 500-message cache") {
+                Graph.messages.messages.value.any { it.msgId == last } && !java.io.File(context.filesDir, "messages.json").readText().contains(oldId)
+            }
+            assertTrue(agent("GET", "/v1/messages/$unread")["read_at"] == null)
+            println("SEARCH_PHASE_PROOF=" + org.json.JSONObject().put("unread_message_id", unread).put("filler_chat_id", filler).put("old_message_id", oldId).put("old_message_evicted_from_disk", true).put("later_real_messages", 505).put("latest_in_first", latestInFirst))
+        } finally { shell("wm size $size"); shell("wm density $density") }
+    }
+
+    /** Run after an actual force-stop/cold launch with preservePairing=true, not ActivityScenario recreation. */
+    @Test
+    fun archivedSessionSurvivesColdLaunchAndOldHitLoads() {
+        val firstId = args.getString("searchChatId")!!
+        val oldId = args.getString("searchMessageId")!!
+        val unreadId = args.getString("searchUnreadMessageId")!!
+        val latestInFirst = args.getString("searchLatestMessageId")!!
+        val literal = args.getString("searchLiteral")!!
+        waitForTag("relay_status", context.getString(R.string.connected), timeoutMs = 30_000)
+        assertTrue("Real process cache reload excludes old message", Graph.messages.messages.value.none { it.msgId == oldId })
+        assertTrue(agent("GET", "/v1/chats/$firstId")["archived_at"] != null)
+        compose.onNodeWithTag("tab_messages").performClick()
+        waitForTag("session_search")
+        compose.onNodeWithTag("sessions_provider").performClick()
+        waitForTag("provider_OpenAI / Codex")
+        compose.onNodeWithTag("provider_OpenAI / Codex").performClick()
+        compose.onNodeWithTag("session_search").performTextReplacement(literal)
+        waitForTag("session_search_empty") // Default Active excludes the archived result.
+        compose.onNodeWithTag("sessions_status_archived").performClick()
+        waitForTag("search_snippet_$firstId", literal)
+        assertTrue(agent("GET", "/v1/messages/$unreadId")["read_at"] == null)
+        screenshot("session-archived-after-cold-launch")
+        compose.onNodeWithTag("chat_$firstId").performClick()
+        waitForTag("message_text_${oldId}_0", literal, timeoutMs = 30_000)
+        compose.waitForIdle()
+        assertTrue("Search opened the actual old matching bubble", compose.onNodeWithTag("message_text_${oldId}_0").isDisplayed())
+        assertTrue(agent("GET", "/v1/messages/$unreadId")["read_at"] == null)
+        val draft = "Draft retained when unarchiving the selected session"
+        compose.onNodeWithTag("message_input").performTextInput(draft)
+        screenshot("session-old-message-target")
+        compose.onNodeWithTag("message_list").performScrollToNode(hasTestTag("message_text_${latestInFirst}_0"))
+        assertTrue(compose.onNodeWithTag("message_text_${latestInFirst}_0").isDisplayed())
+        compose.onNodeWithTag("back_chats").performClick(); compose.waitForIdle()
+        waitForTag("chat_$firstId")
+        compose.onNodeWithTag("chat_$firstId").performClick()
+        waitForTag("message_text_${oldId}_0", literal)
+        compose.waitForIdle()
+        assertTrue("Selecting identical search result re-anchors", compose.onNodeWithTag("message_text_${oldId}_0").isDisplayed())
+        waitForTag("message_input", draft)
+        compose.onNodeWithTag("back_chats").performClick(); compose.waitForIdle()
+        waitForTag("archive_$firstId", "Unarchive")
+        compose.onNodeWithTag("archive_$firstId").performScrollTo().performClick()
+        waitFor(what = "unarchive after actual cold launch") { agent("GET", "/v1/chats/$firstId")["archived_at"] == null }
+        waitForTag("session_search_empty")
+        compose.onNodeWithTag("close_sidebar").performClick(); compose.waitForIdle()
+        waitForTag("message_input", draft)
+        compose.onNodeWithTag("back_chats").performClick(); compose.waitForIdle()
+        compose.onNodeWithTag("sessions_status_active").performClick()
+        waitForTag("search_snippet_$firstId", literal)
+        screenshot("session-unarchived-active")
+        compose.onNodeWithTag("chat_$firstId").performClick()
+        waitForTag("message_input", draft)
+        assertTrue(agent("GET", "/v1/messages/$unreadId")["read_at"] == null)
+        val wifi = shell("settings get global wifi_on").trim() == "1"
+        val mobile = shell("settings get global mobile_data").trim() == "1"
+        try {
+            shell("svc wifi disable"); shell("svc data disable")
+            compose.onNodeWithTag("back_chats").performClick(); compose.waitForIdle()
+            compose.onNodeWithTag("session_search").performTextReplacement("offline network search")
+            waitForTag("session_search_error", timeoutMs = 35_000)
+            waitForTag("retry_session_search")
+            screenshot("session-search-offline-error")
+            compose.onNodeWithTag("clear_session_search").performClick()
+            waitForTag("chat_$firstId")
+            screenshot("session-cached-sidebar-offline")
+            compose.onNodeWithTag("chat_$firstId").performClick()
+            waitForTag("message_input", draft)
+            screenshot("session-cached-conversation-offline")
+        } finally {
+            shell("svc wifi " + if (wifi) "enable" else "disable")
+            shell("svc data " + if (mobile) "enable" else "disable")
+        }
+        waitFor(timeoutMs = 30_000, what = "relay reconnects after restored emulator network") { Graph.connection.relayState.value == dev.agentring.core.RelaySocket.State.CONNECTED }
+        compose.onNodeWithTag("back_chats").performClick(); compose.waitForIdle()
+        compose.onNodeWithTag("session_search").performTextReplacement(literal)
+        waitForTag("search_snippet_$firstId", literal)
+        compose.onNodeWithTag("chat_$firstId").performClick()
+        waitForTag("message_input", draft)
+        assertTrue(agent("GET", "/v1/messages/$unreadId")["read_at"] == null)
+    }
+
     @Test
     fun textAttachmentsOpenSelectCopyAndSave() {
         val chatId = args.getString("textChatId") ?: error("textChatId required")
@@ -892,7 +1095,7 @@ class SessionMediaEndToEndTest {
                 waitForTag("call_project", "Project: Unknown project")
                 screenshot("new-$callee-call")
                 agent("POST", "/v1/calls/$id/decline", """{"reason":"callee_unavailable"}""")
-                waitForTag("call_status", context.getString(R.string.call_unavailable))
+                waitForTag("call_status", context.getString(R.string.call_callee_unavailable))
                 assertEquals("callee_unavailable", agent("GET", "/v1/calls/$id")["end_reason"]!!.jsonPrimitive.content)
                 waitFor(what = "unavailable call closed without fallback") { Graph.calls.state.value == null }
             }
@@ -923,7 +1126,7 @@ class SessionMediaEndToEndTest {
             waitForTag("call_project", "Project: Existing call routing fixture")
             screenshot("existing-codex-call")
             agent("POST", "/v1/calls/$id/decline", """{"reason":"callee_unavailable"}""")
-            waitForTag("call_status", context.getString(R.string.call_unavailable))
+            waitForTag("call_status", context.getString(R.string.call_callee_unavailable))
             waitFor(what = "existing unavailable session closed without replacement") { Graph.calls.state.value == null }
             assertEquals(session, agent("GET", "/v1/chats/$chatId")["client_session_id"]!!.jsonPrimitive.content)
         } finally {

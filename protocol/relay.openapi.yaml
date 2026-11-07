@@ -434,6 +434,9 @@ paths:
       tags: [messages]
       operationId: listChats
       security: [{ agentKey: [] }, { deviceJwt: [] }]
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [all, active, archived], default: all } }
+        - { name: provider, in: query, schema: { type: string, minLength: 1, maxLength: 64 }, description: Exact caller.provider value ignoring case. }
       responses:
         "200":
           description: Agent session chats, most recently updated first.
@@ -444,7 +447,56 @@ paths:
                 required: [chats]
                 properties:
                   chats: { type: array, items: { $ref: "#/components/schemas/Chat" } }
+  /v1/chats/search:
+    get:
+      tags: [messages]
+      operationId: searchChats
+      summary: Literal case-insensitive search across session metadata and full relay message history.
+      security: [{ agentKey: [] }, { deviceJwt: [] }]
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 200 } }
+        - { name: status, in: query, schema: { type: string, enum: [all, active, archived], default: all } }
+        - { name: provider, in: query, schema: { type: string, minLength: 1, maxLength: 64 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 30, default: 15 } }
+      responses:
+        "200":
+          description: One result per matching chat, newest-updated chats first. Metadata wins; otherwise the newest matching message supplies the snippet. Search does not mark messages delivered or read.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results: { type: array, maxItems: 30, items: { $ref: "#/components/schemas/ChatSearchResult" } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /v1/chats/{chat_id}:
+    patch:
+      tags: [messages]
+      operationId: archiveChat
+      summary: Archive or unarchive a session without deleting history or stopping its agent.
+      security: [{ agentKey: [] }, { deviceJwt: [] }]
+      parameters:
+        - { name: chat_id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [archived]
+              properties:
+                archived: { type: boolean }
+      responses:
+        "200":
+          description: Current chat. State changes update updated_at and emit chat.updated; repeating a state preserves timestamps and emits nothing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Chat" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Chat does not exist. }
     get:
       tags: [messages]
       operationId: getChat
@@ -1026,6 +1078,9 @@ components:
       type: object
       required: [chat_id, client_session_id, title, description, caller, created_at, updated_at]
       properties:
+        archived_at:
+          allOf: [{ $ref: "#/components/schemas/Timestamp" }]
+          description: Archive time in milliseconds; omitted while active. Metadata updates and new messages never clear it.
         callee: { $ref: "#/components/schemas/CallCallee" }
         chat_id: { type: string }
         client_session_id: { type: string }
@@ -1034,6 +1089,19 @@ components:
         caller: { $ref: "#/components/schemas/Caller" }
         created_at: { $ref: "#/components/schemas/Timestamp" }
         updated_at: { $ref: "#/components/schemas/Timestamp" }
+    ChatSearchResult:
+      type: object
+      required: [chat, match]
+      properties:
+        chat: { $ref: "#/components/schemas/Chat" }
+        match:
+          type: object
+          required: [kind, snippet]
+          properties:
+            kind: { type: string, enum: [metadata, message] }
+            snippet: { type: string, maxLength: 320, description: Plain text around the literal matching query with original case preserved. }
+            msg_id: { type: string, description: Present for message matches; use to open that message in its chat. }
+            created_at: { $ref: "#/components/schemas/Timestamp" }
     ChatUpdatedEvent:
       allOf:
         - $ref: "#/components/schemas/EventBase"

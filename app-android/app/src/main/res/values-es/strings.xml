@@ -83,6 +83,7 @@
     <string name="call_declined">Llamada rechazada</string>
     <string name="call_missed">Llamada perdida</string>
     <string name="call_missed_from">Llamada perdida de %1$s</string>
+    <string name="call_callee_unavailable">Este agente no puede atender una llamada ahora</string>
     <string name="call_unavailable">Esta llamada ya no está disponible</string>
     <string name="call_answered_elsewhere">Contestada en otro dispositivo</string>
     <string name="call_failed">No se pudo conectar la llamada</string>

@@ -36,6 +36,9 @@ class RelayApi(
     }
 
     @Serializable
+    private data class ArchiveChatBody(val archived: Boolean)
+
+    @Serializable
     private data class FcmBody(@SerialName("fcm_token") val fcmToken: String)
 
     @Serializable
@@ -73,7 +76,25 @@ class RelayApi(
         return call("GET", q, null, MessagePage.serializer())
     }
 
-    fun listChats(): ChatPage = call("GET", "/v1/chats", null, ChatPage.serializer())
+    fun listChats(status: String? = null, provider: String? = null): ChatPage =
+        call("GET", chatQuery("/v1/chats", status, provider), null, ChatPage.serializer())
+
+    fun searchChats(query: String, status: String = "active", provider: String? = null, limit: Int = 15): ChatSearchPage {
+        require(query.length in 1..200 && limit in 1..30)
+        return call("GET", chatQuery("/v1/chats/search", status, provider, query, limit), null, ChatSearchPage.serializer())
+    }
+
+    private fun chatQuery(path: String, status: String?, provider: String?, query: String? = null, limit: Int? = null): String {
+        val url = (baseUrl.trimEnd('/') + path).toHttpUrl().newBuilder()
+        status?.let { url.addQueryParameter("status", it) }
+        provider?.let { url.addQueryParameter("provider", it) }
+        query?.let { url.addQueryParameter("q", it) }
+        limit?.let { url.addQueryParameter("limit", it.toString()) }
+        return url.build().encodedQuery?.let { "$path?$it" } ?: path
+    }
+
+    fun setChatArchived(chatId: String, archived: Boolean): Chat =
+        call("PATCH", "/v1/chats/$chatId", body(ArchiveChatBody.serializer(), ArchiveChatBody(archived)), Chat.serializer())
 
     fun getChat(chatId: String): Chat = call("GET", "/v1/chats/$chatId", null, Chat.serializer())
 

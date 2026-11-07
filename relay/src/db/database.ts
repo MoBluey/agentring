@@ -120,6 +120,9 @@ const MIGRATIONS: string[] = [
   ALTER TABLE chats ADD COLUMN callee TEXT;
   CREATE UNIQUE INDEX messages_question_answer ON messages(answer_to) WHERE answer_to IS NOT NULL;
   `,
+  `
+  ALTER TABLE chats ADD COLUMN archived_at INTEGER;
+  `,
 ];
 
 export type Db = DatabaseSync;

@@ -70,13 +70,16 @@ fun MessagesScreen(pairing: Pairing) {
     val allMessages by Graph.messages.messages.collectAsStateWithLifecycle()
     var selected by rememberSaveable { mutableStateOf<String?>(null) }
     var expanded by rememberSaveable { mutableStateOf(true) }
+    var searchTarget by rememberSaveable { mutableStateOf<String?>(null) }
+    var searchSelection by rememberSaveable { mutableStateOf(0L) }
+    val browser = rememberSessionBrowser(chats)
     val drawer = androidx.compose.material3.rememberDrawerState(androidx.compose.material3.DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val drafts = rememberSaveableStateHolder()
     val requestedChat = AppVisibility.requestedChat.value
     LaunchedEffect(requestedChat, chats) {
         if (requestedChat != null && chats.any { it.chatId == requestedChat }) {
-            selected = requestedChat; AppVisibility.requestedChat.value = null; drawer.close()
+            selected = requestedChat; searchTarget = null; searchSelection++; AppVisibility.requestedChat.value = null; drawer.close()
         }
     }
     val chat = chats.firstOrNull { it.chatId == selected }
@@ -84,7 +87,7 @@ fun MessagesScreen(pairing: Pairing) {
         val wide = maxWidth >= 600.dp
         val drawerClosed = drawer.currentValue == androidx.compose.material3.DrawerValue.Closed && drawer.targetValue == androidx.compose.material3.DrawerValue.Closed
         fun showSessions() { if (wide) expanded = !expanded else scope.launch { drawer.open() } }
-        fun choose(id: String) { selected = id; scope.launch { drawer.close() } }
+        fun choose(result: dev.agentring.core.ChatSearchResult) { Graph.messages.upsertChat(result.chat); selected = result.chat.chatId; searchTarget = result.match.msgId; searchSelection++; scope.launch { drawer.close() } }
         LaunchedEffect(wide, chat == null) {
             if (wide) drawer.close() else if (chat == null) drawer.open()
         }
@@ -94,19 +97,19 @@ fun MessagesScreen(pairing: Pairing) {
             gesturesEnabled = !wide,
             drawerContent = {
                 if (!wide) androidx.compose.material3.ModalDrawerSheet(Modifier.width(minOf(maxWidth * 0.85f, 320.dp))) {
-                    SessionSidebar(pairing, chats, allMessages, selected, ::choose) { scope.launch { drawer.close() } }
+                    SessionSidebar(pairing, chats, allMessages, selected, browser, ::choose) { scope.launch { drawer.close() } }
                 }
             },
         ) {
             // Keep the conversation at one stable composition position across width/fold changes.
             Row(Modifier.fillMaxSize()) {
                 if (wide && expanded) {
-                    Box(Modifier.width(300.dp).fillMaxHeight()) { SessionSidebar(pairing, chats, allMessages, selected, ::choose) { expanded = false } }
+                    Box(Modifier.width(300.dp).fillMaxHeight()) { SessionSidebar(pairing, chats, allMessages, selected, browser, ::choose) { expanded = false } }
                     androidx.compose.material3.VerticalDivider()
                 }
                 Box(Modifier.weight(1f).fillMaxHeight().testTag("conversation_pane")) {
                     if (chat != null) drafts.SaveableStateProvider(chat.chatId) {
-                        androidx.compose.runtime.key(chat.chatId) { ConversationScreen(pairing, chat, visible = wide || drawerClosed, onBack = ::showSessions) }
+                        androidx.compose.runtime.key(chat.chatId) { ConversationScreen(pairing, chat, visible = wide || drawerClosed, focusMessageId = searchTarget, focusRequest = searchSelection, onBack = ::showSessions) }
                     } else Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                         TextButton(onClick = ::showSessions, modifier = Modifier.testTag("open_sidebar")) { Text("Sessions") }
                         Text("Select a session", style = MaterialTheme.typography.headlineSmall)
@@ -118,37 +121,17 @@ fun MessagesScreen(pairing: Pairing) {
 }
 
 @Composable
-private fun SessionSidebar(pairing: Pairing, chats: List<Chat>, messages: List<Message>, selected: String?, onSelect: (String) -> Unit, onClose: () -> Unit) {
-    Column(Modifier.fillMaxSize().testTag("sessions_sidebar")) {
-        Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Sessions", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
-            TextButton(onClick = onClose, modifier = Modifier.testTag("close_sidebar")) { Text("Close") }
-        }
-        LazyColumn(Modifier.weight(1f).fillMaxWidth().testTag("chat_list")) {
-            items(chats, key = { it.chatId }) { item ->
-                Surface(onClick = { onSelect(item.chatId) },
-                    color = if (item.chatId == selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface,
-                    modifier = Modifier.fillMaxWidth().testTag("chat_${item.chatId}")) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(item.displayTitle(pairing.agentName), style = MaterialTheme.typography.titleMedium)
-                        Text(item.caller.modelLine, style = MaterialTheme.typography.bodySmall)
-                        Text(item.caller.projectLine, style = MaterialTheme.typography.bodySmall)
-                        messages.lastOrNull { it.chatId == item.chatId }?.let { Text(it.text.ifBlank { it.attachments.firstOrNull()?.name ?: "Attachment" }, maxLines = 1, style = MaterialTheme.typography.bodyMedium) }
-                    }
-                }
-                androidx.compose.material3.HorizontalDivider()
-            }
-        }
-    }
-}
-
-@Composable
-private fun ConversationScreen(pairing: Pairing, chat: Chat, visible: Boolean, onBack: () -> Unit) {
+private fun ConversationScreen(pairing: Pairing, chat: Chat, visible: Boolean, focusMessageId: String?, focusRequest: Long, onBack: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val allMessages by Graph.messages.messages.collectAsStateWithLifecycle()
     val messages = allMessages.filter { it.chatId == chat.chatId }
-    val threadVisible = visible && !AppVisibility.imagePreviewOpen.value
+    val contentVisible = visible && !AppVisibility.imagePreviewOpen.value
+    var focusReached by rememberSaveable(focusMessageId, focusRequest) { mutableStateOf(false) }
+    var focusLoading by remember(focusMessageId, focusRequest) { mutableStateOf(focusMessageId != null) }
+    var focusError by remember(focusMessageId, focusRequest) { mutableStateOf<String?>(null) }
+    var focusRetry by remember { mutableStateOf(0) }
+    val threadVisible = contentVisible && (focusMessageId == null || focusReached && !focusLoading && focusError == null)
     var input by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue()) }
     var sending by remember { mutableStateOf(false) }
     var sendError by remember { mutableStateOf<String?>(null) }
@@ -184,11 +167,27 @@ private fun ConversationScreen(pairing: Pairing, chat: Chat, visible: Boolean, o
         AppVisibility.visibleChatId = chat.chatId.takeIf { threadVisible }
         onDispose { AppVisibility.visibleChatId = null }
     }
-    LaunchedEffect(chat.chatId, threadVisible) {
-        withContext(Dispatchers.IO) { Graph.api()?.let { api -> runCatching {
-            Graph.messages.refreshChat(api, chat.chatId)
-            if (threadVisible && AppVisibility.isForeground && AppVisibility.visibleChatId == chat.chatId) Graph.messages.markAgentMessagesRead(api, chat.chatId)
-        } } }
+    LaunchedEffect(chat.chatId, contentVisible, focusMessageId, focusRequest, focusRetry) {
+        try {
+            if (focusMessageId != null) { focusLoading = true; focusError = null }
+            withContext(Dispatchers.IO) {
+                val api = Graph.api() ?: error("Not paired")
+                if (focusMessageId != null) {
+                    val target = api.getMessage(focusMessageId)
+                    require(target.chatId == chat.chatId) { "Search result belongs to another session" }
+                    Graph.messages.upsert(target)
+                }
+                Graph.messages.refreshChat(api, chat.chatId)
+            }
+            focusLoading = false
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+        catch (e: Exception) { focusLoading = false; if (focusMessageId != null) focusError = e.message ?: "Could not load matching message" }
+    }
+    LaunchedEffect(focusMessageId, focusRequest, messages.size, focusLoading, contentVisible) {
+        if (focusMessageId != null && !focusReached && !focusLoading && focusError == null && contentVisible) {
+            val index = messages.asReversed().indexOfFirst { it.msgId == focusMessageId }
+            if (index >= 0) { listState.scrollToItem(index); focusReached = true }
+        }
     }
     // Opening the thread (or a new message arriving while it's open) marks the agent's messages read.
     LaunchedEffect(messages.size, AppVisibility.foreground.value, threadVisible) {
@@ -198,7 +197,7 @@ private fun ConversationScreen(pairing: Pairing, chat: Chat, visible: Boolean, o
             withContext(Dispatchers.IO) { Graph.api()?.let { runCatching { Graph.messages.markAgentMessagesRead(it, chat.chatId) } } }
         }
     }
-    LaunchedEffect(messages.size) { if (threadVisible && messages.isNotEmpty()) listState.animateScrollToItem(0) }
+    LaunchedEffect(messages.size) { if (threadVisible && focusMessageId == null && messages.isNotEmpty()) listState.animateScrollToItem(0) }
 
     Column(Modifier.fillMaxSize().imePadding()) {
         Row(
@@ -215,9 +214,18 @@ private fun ConversationScreen(pairing: Pairing, chat: Chat, visible: Boolean, o
             }
             val relay by Graph.connection.relayState.collectAsStateWithLifecycle()
             val revoked by Graph.pairing.revoked.collectAsStateWithLifecycle()
-            CallAgentButton(pairing, relay == dev.agentring.core.RelaySocket.State.CONNECTED, online == true, revoked, chatId = chat.chatId, compact = true)
+            CallAgentButton(pairing, relay == dev.agentring.core.RelaySocket.State.CONNECTED, online == true, revoked, chatId = chat.chatId, compact = true, sessionVoiceAvailable = chat.callee != null)
         }
+        if (chat.callee == null) Text("Voice calls to this session are not connected yet", style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).testTag("session_voice_unavailable"), color = MaterialTheme.colorScheme.onSurfaceVariant)
         androidx.compose.material3.HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        if (focusLoading) LinearProgressIndicator(Modifier.fillMaxWidth().testTag("search_target_loading"))
+        focusError?.let {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Could not open search match: $it", Modifier.weight(1f), color = MaterialTheme.colorScheme.error)
+                TextButton(onClick = { focusRetry++ }) { Text("Retry") }
+            }
+        }
         if (messages.isEmpty()) {
             Column(
                 Modifier.weight(1f).fillMaxWidth().padding(32.dp),

@@ -341,6 +341,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/chats/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Literal case-insensitive search across session metadata and full relay message history. */
+        get: operations["searchChats"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/chats/{chat_id}": {
         parameters: {
             query?: never;
@@ -354,7 +371,8 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        patch?: never;
+        /** Archive or unarchive a session without deleting history or stopping its agent. */
+        patch: operations["archiveChat"];
         trace?: never;
     };
     "/v1/attachments": {
@@ -741,6 +759,8 @@ export interface components {
             caller?: components["schemas"]["Caller"];
         };
         Chat: {
+            /** @description Archive time in milliseconds; omitted while active. Metadata updates and new messages never clear it. */
+            archived_at?: components["schemas"]["Timestamp"];
             callee?: components["schemas"]["CallCallee"];
             chat_id: string;
             client_session_id: string;
@@ -749,6 +769,18 @@ export interface components {
             caller: components["schemas"]["Caller"];
             created_at: components["schemas"]["Timestamp"];
             updated_at: components["schemas"]["Timestamp"];
+        };
+        ChatSearchResult: {
+            chat: components["schemas"]["Chat"];
+            match: {
+                /** @enum {string} */
+                kind: "metadata" | "message";
+                /** @description Plain text around the literal matching query with original case preserved. */
+                snippet: string;
+                /** @description Present for message matches; use to open that message in its chat. */
+                msg_id?: string;
+                created_at?: components["schemas"]["Timestamp"];
+            };
         };
         ChatUpdatedEvent: components["schemas"]["EventBase"] & {
             /** @constant */
@@ -1594,7 +1626,11 @@ export interface operations {
     };
     listChats: {
         parameters: {
-            query?: never;
+            query?: {
+                status?: "all" | "active" | "archived";
+                /** @description Exact caller.provider value ignoring case. */
+                provider?: string;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -1640,6 +1676,35 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
         };
     };
+    searchChats: {
+        parameters: {
+            query: {
+                q: string;
+                status?: "all" | "active" | "archived";
+                provider?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One result per matching chat, newest-updated chats first. Metadata wins; otherwise the newest matching message supplies the snippet. Search does not mark messages delivered or read. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        results: components["schemas"]["ChatSearchResult"][];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
     getChat: {
         parameters: {
             query?: never;
@@ -1660,6 +1725,43 @@ export interface operations {
                     "application/json": components["schemas"]["Chat"];
                 };
             };
+            /** @description Chat does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    archiveChat: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                chat_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    archived: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description Current chat. State changes update updated_at and emit chat.updated; repeating a state preserves timestamps and emits nothing. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Chat"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             /** @description Chat does not exist. */
             404: {
                 headers: {

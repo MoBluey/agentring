@@ -220,7 +220,7 @@ private fun HomeScreen(pairing: Pairing) {
 
 /** "Call agent" (M4): places a call to the agent and opens the call screen. */
 @Composable
-internal fun CallAgentButton(pairing: Pairing, relayConnected: Boolean, agentOnline: Boolean, revoked: Boolean, callee: String? = null, chatId: String? = null, compact: Boolean = false) {
+internal fun CallAgentButton(pairing: Pairing, relayConnected: Boolean, agentOnline: Boolean, revoked: Boolean, callee: String? = null, chatId: String? = null, compact: Boolean = false, sessionVoiceAvailable: Boolean = true) {
     val targetName = if (chatId != null) "this session" else if (callee == "codex") "Codex" else "Claude"
     val ctx = LocalContext.current
     val call by Graph.calls.state.collectAsStateWithLifecycle()
@@ -242,7 +242,7 @@ internal fun CallAgentButton(pairing: Pairing, relayConnected: Boolean, agentOnl
     // Go on either way: without the microphone the user can still hear the agent.
     val mic = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { place() }
 
-    val enabled = relayConnected && agentOnline && idle && !placing && !revoked
+    val enabled = relayConnected && agentOnline && idle && !placing && !revoked && sessionVoiceAvailable
     val scheme = MaterialTheme.colorScheme
     if (compact) {
         Column(horizontalAlignment = Alignment.End) {
