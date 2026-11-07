@@ -155,7 +155,10 @@ class SessionMediaEndToEndTest {
         compose.onNodeWithTag("get_started").performClick()
         waitForTag("show_paste")
         compose.onNodeWithTag("show_paste").performClick()
+        waitForTag("pairing_code")
+        compose.waitForIdle()
         compose.onNodeWithTag("pairing_code").performScrollTo().performTextInput(qr)
+        compose.waitForIdle()
         compose.onNodeWithTag("pair_button").performScrollTo().performClick()
         waitForTag("calls_next", timeoutMs = 20_000)
         compose.onNodeWithTag("calls_next").performClick()
@@ -507,6 +510,122 @@ class SessionMediaEndToEndTest {
         agent("POST", "/v1/calls/$callId/end", "{}")
         waitFor(what = "call ended") { Graph.calls.state.value == null }
         verifyCallSelection()
+    }
+
+    @Test
+    fun textAttachmentsOpenSelectCopyAndSave() {
+        val chatId = args.getString("textChatId") ?: error("textChatId required")
+        val messageIds = args.getString("textMessageIds")!!.split(',')
+        pairNormally()
+        compose.onNodeWithTag("tab_messages").performClick()
+        openChat(chatId)
+        val clipboard = context.getSystemService(ClipboardManager::class.java)
+        for ((index, messageId) in messageIds.withIndex()) {
+            val attachment = ProtocolJson.decodeFromString(Attachment.serializer(), agent("GET", "/v1/messages/$messageId")["attachments"]!!.jsonArray.single().toString())
+            val id = attachment.attachmentId
+            waitForTag("download_$id")
+            assertTrue(AttachmentStore(context).cached(attachment) == null)
+            compose.waitForIdle()
+            compose.onNodeWithTag("message_list").performScrollToNode(hasTestTag("download_$id"))
+            compose.onNodeWithTag("download_$id").performClick()
+            waitForTag("open_$id", "View text")
+            compose.onNodeWithTag("open_$id").performScrollTo().performClick()
+            waitForTag("text_attachment_content")
+            val bounds = compose.onNodeWithTag("text_viewer").fetchSemanticsNode().boundsInRoot
+            val window = context.getSystemService(android.view.WindowManager::class.java).currentWindowMetrics.bounds
+            assertTrue(bounds.width >= window.width() - 2 && bounds.height >= window.height() - 2)
+            val expected = agentBytes("/v1/attachments/$id/content").toString(Charsets.UTF_8)
+            waitForTag("text_attachment_content", expected)
+            compose.onNodeWithTag("copy_text_attachment").performClick()
+            assertEquals(expected, clipboard.primaryClip!!.getItemAt(0).text.toString())
+            compose.onNodeWithTag("text_attachment_content").performTouchInput { longClick(Offset(30f, 20f)) }
+            nativeClick("Copy")
+            val selected = clipboard.primaryClip!!.getItemAt(0).text.toString()
+            assertTrue("Native selected text", selected.isNotBlank() && selected.length < expected.length && expected.contains(selected))
+            screenshot("text-viewer-" + attachment.name.substringAfterLast('.'))
+            // Dismiss native selection before exercising the viewer navigation/save actions.
+            compose.onNodeWithTag("copy_text_attachment").performClick()
+            if (index == 0) {
+                val hidden = agent("POST", "/v1/messages", """{"chat_id":"$chatId","text":"Arrived behind the full-screen text"}""")["msg_id"]!!.jsonPrimitive.content
+                waitFor(what = "delivered behind text viewer") { agent("GET", "/v1/messages/$hidden")["delivered_at"] != null }
+                assertTrue(agent("GET", "/v1/messages/$hidden")["read_at"] == null)
+                compose.onNodeWithTag("save_text_original").performClick()
+                nativeClick("Save", ignoreCase = true)
+                waitForTag("text_viewer")
+                waitFor(what = "saved original text bytes") { shell("sha256sum /sdcard/Download/${attachment.name} /sdcard/Download/${attachment.name}.txt").lineSequence().any { it.substringBefore(' ') == attachment.sha256 } }
+                InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_BACK)
+                waitForTag("message_input")
+                waitFor(what = "read after returning from text viewer") { agent("GET", "/v1/messages/$hidden")["read_at"] != null }
+            } else {
+                compose.onNodeWithTag("close_text_viewer").performClick(); compose.waitForIdle()
+                waitForTag("message_input")
+            }
+        }
+        val stamp = System.currentTimeMillis()
+        val large = ("Preview line with bounded bytes\n".repeat(10000)).toByteArray()
+        val largeMetadata = agentUpload(chatId, "large-$stamp.log", "text/plain", large)
+        val largeId = largeMetadata["attachment_id"]!!.jsonPrimitive.content
+        agent("POST", "/v1/messages", """{"chat_id":"$chatId","text":"","attachment_ids":["$largeId"]}""")
+        waitForTag("download_$largeId")
+        compose.waitForIdle()
+        compose.onNodeWithTag("message_list").performScrollToNode(hasTestTag("download_$largeId"))
+        compose.onNodeWithTag("download_$largeId").performClick()
+        waitForTag("open_$largeId")
+        compose.onNodeWithTag("open_$largeId").performScrollTo().performClick()
+        waitForTag("text_preview_truncated")
+        waitForTag("copy_text_attachment", "Copy preview")
+        compose.onNodeWithTag("copy_text_attachment").performClick()
+        val copied = clipboard.primaryClip!!.getItemAt(0).text.toString()
+        assertEquals(large.copyOf(64 * 1024).toString(Charsets.UTF_8), copied)
+        screenshot("text-viewer-truncated")
+        compose.onNodeWithTag("save_text_original").performClick()
+        nativeClick("Save", ignoreCase = true)
+        waitForTag("text_viewer")
+        waitFor(what = "saved complete large original") { shell("sha256sum /sdcard/Download/large-$stamp.log /sdcard/Download/large-$stamp.log.txt").lineSequence().any { it.substringBefore(' ') == largeMetadata["sha256"]!!.jsonPrimitive.content } }
+        compose.onNodeWithTag("close_text_viewer").performClick(); compose.waitForIdle()
+        val binary = agentUpload(chatId, "binary-$stamp.txt", "text/plain", byteArrayOf(65, 0, 66))
+        val binaryId = binary["attachment_id"]!!.jsonPrimitive.content
+        agent("POST", "/v1/messages", """{"chat_id":"$chatId","text":"","attachment_ids":["$binaryId"]}""")
+        waitForTag("download_$binaryId")
+        compose.waitForIdle()
+        compose.onNodeWithTag("message_list").performScrollToNode(hasTestTag("download_$binaryId"))
+        compose.onNodeWithTag("download_$binaryId").performClick()
+        waitForTag("open_$binaryId")
+        compose.onNodeWithTag("open_$binaryId").performScrollTo().performClick()
+        waitForTag("text_preview_error", "binary data")
+        waitForTag("save_text_original")
+        screenshot("text-viewer-binary-fallback")
+        compose.onNodeWithTag("close_text_viewer").performClick(); compose.waitForIdle()
+        // An unsupported binary keeps normal download/save/external-open behaviour.
+        val pdf = agentUpload(chatId, "unsupported-$stamp.pdf", "application/pdf", "%PDF-1.4\n%%EOF".toByteArray())
+        val pdfId = pdf["attachment_id"]!!.jsonPrimitive.content
+        agent("POST", "/v1/messages", """{"chat_id":"$chatId","text":"","attachment_ids":["$pdfId"]}""")
+        waitForTag("download_$pdfId")
+        compose.waitForIdle()
+        compose.onNodeWithTag("message_list").performScrollToNode(hasTestTag("download_$pdfId"))
+        compose.onNodeWithTag("download_$pdfId").performClick()
+        waitForTag("open_$pdfId", "Open")
+        waitForTag("save_$pdfId")
+        // Shared verified-cache image path remains intact after extracting verification.
+        val image = Bitmap.createBitmap(4, 2, Bitmap.Config.ARGB_8888)
+        val imageBytes = ByteArrayOutputStream().also { image.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+        image.recycle()
+        val metadata = agentUpload(chatId, "image-boundary-$stamp.png", "image/png", imageBytes)
+        val imageAttachment = ProtocolJson.decodeFromString(Attachment.serializer(), metadata.toString())
+        val store = AttachmentStore(context)
+        agent("POST", "/v1/messages", """{"chat_id":"$chatId","text":"Image cache boundary","attachment_ids":["${imageAttachment.attachmentId}"]}""")
+        waitForTag("preview_${imageAttachment.attachmentId}")
+        val file = store.cached(imageAttachment)!!
+        val decoded = store.image(imageAttachment, file, 512)
+        assertEquals(4, decoded.width); decoded.recycle()
+        val textAttachment = ProtocolJson.decodeFromString(Attachment.serializer(), agent("GET", "/v1/messages/${messageIds.first()}")["attachments"]!!.jsonArray.single().toString())
+        val cached = store.cached(textAttachment)!!
+        val original = cached.readBytes()
+        try {
+            cached.writeBytes(ByteArray(original.size) { 65 })
+            try { store.text(textAttachment, cached); org.junit.Assert.fail("Changed cache checksum must fail") }
+            catch (e: IllegalArgumentException) { assertTrue(e.message!!.contains("checksum")) }
+        } finally { cached.writeBytes(original) }
     }
 
     @Test

@@ -8,6 +8,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.core.content.FileProvider
 import dev.agentring.core.Attachment
+import dev.agentring.core.TextAttachmentPreview
 import dev.agentring.core.AttachmentTransfer
 import dev.agentring.core.RelayApi
 import java.io.File
@@ -89,13 +90,7 @@ class AttachmentStore(private val context: Context) {
     /** Bounds decoding before allocating pixels; ImageDecoder also applies image orientation. */
     fun image(attachment: Attachment, file: File, maxDimension: Int): Bitmap {
         require(maxDimension in 1..2048)
-        require(file.length() == attachment.sizeBytes) { "Cached image size changed. Retry the preview." }
-        val digest = MessageDigest.getInstance("SHA-256")
-        file.inputStream().use { input ->
-            val buffer = ByteArray(64 * 1024)
-            while (true) { val count = input.read(buffer); if (count < 0) break; digest.update(buffer, 0, count) }
-        }
-        require(digest.digest().joinToString("") { "%02x".format(it) }.equals(attachment.sha256, true)) { "Cached image checksum changed. Retry the preview." }
+        verifyPreviewFile(attachment, file)
         try {
             if (android.os.Build.VERSION.SDK_INT >= 28) {
                 return android.graphics.ImageDecoder.decodeBitmap(android.graphics.ImageDecoder.createSource(file)) { decoder, info, _ ->
@@ -112,6 +107,23 @@ class AttachmentStore(private val context: Context) {
             return BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inSampleSize = sample })
                 ?: error("This image format cannot be previewed")
         } catch (e: OutOfMemoryError) { throw IllegalStateException("Not enough memory to preview this image. Save it to view elsewhere.", e) }
+    }
+
+    /** Verifies the complete original before decoding a bounded plain-text preview. */
+    fun text(attachment: Attachment, file: File): TextAttachmentPreview {
+        require(TextAttachmentPreview.supports(attachment.name, attachment.mediaType)) { "This file type has no text preview. Save the original to open it elsewhere." }
+        verifyPreviewFile(attachment, file)
+        return file.inputStream().use { TextAttachmentPreview.read(it) }
+    }
+
+    private fun verifyPreviewFile(attachment: Attachment, file: File) {
+        require(file.length() == attachment.sizeBytes) { "Cached file size changed. Retry the preview." }
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) { val count = input.read(buffer); if (count < 0) break; digest.update(buffer, 0, count) }
+        }
+        require(digest.digest().joinToString("") { "%02x".format(it) }.equals(attachment.sha256, true)) { "Cached file checksum changed. Retry the preview." }
     }
 
     fun discardCached(attachment: Attachment) { target(attachment).delete() }

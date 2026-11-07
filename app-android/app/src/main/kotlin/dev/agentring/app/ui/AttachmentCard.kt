@@ -18,6 +18,7 @@ import androidx.compose.ui.unit.dp
 import dev.agentring.app.Graph
 import dev.agentring.app.data.AttachmentStore
 import dev.agentring.core.Attachment
+import dev.agentring.core.TextAttachmentPreview
 import dev.agentring.core.AttachmentTransfer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -39,6 +40,7 @@ fun AttachmentCard(attachment: Attachment) {
     var previewError by remember(attachment.attachmentId) { mutableStateOf<String?>(null) }
     var viewing by rememberSaveable(attachment.attachmentId) { mutableStateOf(false) }
     val isImage = attachment.mediaType.startsWith("image/", ignoreCase = true)
+    val isText = TextAttachmentPreview.supports(attachment.name, attachment.mediaType)
     val save = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(attachment.mediaType)) { uri ->
         if (uri != null && file != null) scope.launch {
             try { withContext(Dispatchers.IO) { store.save(file!!, uri) }; error = null }
@@ -70,7 +72,10 @@ fun AttachmentCard(attachment: Attachment) {
             catch (e: Exception) { previewError = e.message ?: "Image preview unavailable" }
         }
     }
-    if (viewing && file != null) ImageAttachmentViewer(attachment, file!!, store, onClose = { viewing = false }, onSave = { save.launch(attachment.name) })
+    if (viewing && file != null) {
+        if (isImage) ImageAttachmentViewer(attachment, file!!, store, onClose = { viewing = false }, onSave = { save.launch(attachment.name) })
+        else if (isText) TextAttachmentViewer(attachment, file!!, store, onClose = { viewing = false }, onSave = { save.launch(attachment.name) })
+    }
     Column(Modifier.fillMaxWidth().testTag("attachment_${attachment.attachmentId}"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(attachment.name, style = MaterialTheme.typography.titleSmall)
         Text("${attachment.mediaType} · ${attachmentSize(attachment.sizeBytes)}", style = MaterialTheme.typography.bodySmall)
@@ -86,10 +91,10 @@ fun AttachmentCard(attachment: Attachment) {
         } else {
             Row {
                 TextButton(colors = buttonColors, onClick = {
-                    try { if (isImage) viewing = true else store.open(file!!, attachment); error = null }
+                    try { if (isImage || isText) viewing = true else store.open(file!!, attachment); error = null }
                     catch (e: android.content.ActivityNotFoundException) { error = "No app can open this file. Save it to use elsewhere." }
                     catch (e: Exception) { error = "Could not open: ${e.message}" }
-                }, modifier = Modifier.testTag("open_${attachment.attachmentId}")) { Text(if (isImage) "View image" else "Open") }
+                }, modifier = Modifier.testTag("open_${attachment.attachmentId}")) { Text(if (isImage) "View image" else if (isText) "View text" else "Open") }
                 TextButton(colors = buttonColors, onClick = { save.launch(attachment.name) }, modifier = Modifier.testTag("save_${attachment.attachmentId}")) { Text("Save as…") }
             }
         }
