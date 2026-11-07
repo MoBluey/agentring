@@ -4,11 +4,10 @@ import time
 from types import SimpleNamespace
 
 import pytest
-
 from agentring.relay_client import RelayError
+from agentring.voice.inbound import run_prepared_incoming
 from agentring.voice.providers import PreparedCall, VoiceConfigError
 from agentring.voice.quick import build_agent
-from agentring.voice.inbound import run_prepared_incoming
 
 
 def fixture_call(mode="new"):
@@ -90,7 +89,7 @@ def test_expiry_or_cancellation_after_preparation_always_closes(monkeypatch,canc
         client=Client();closed=[];waiting=asyncio.Event()
         async def close():closed.append(True)
         async def blocked_mcp(*args,**kwargs):waiting.set();await asyncio.Future()
-        import agentring.voice.quick as quick
+        from agentring.voice import quick
         monkeypatch.setattr(quick,"mcp_tools",blocked_mcp)
         async def builder(call,scoped):return await build_agent(Choice(close),call=call,relay=scoped,mcp=["unused"])
         task=asyncio.create_task(run_prepared_incoming(client,fixture_event(10 if cancel else .05),builder))
@@ -134,4 +133,40 @@ def test_failure_after_acceptance_ends_call_and_closes():
             return built
         assert await run_prepared_incoming(client, fixture_event(), builder) is None
         assert closed == [True] and client.ends == ["call-fixture"] and not client.declines
+    asyncio.run(run())
+
+
+def test_authenticated_invite_expiry_reaches_build_alongside_fresh_get(monkeypatch):
+    async def run():
+        client=Client()
+        original=fixture_call()
+        assert 'expires_at' not in original  # Actual GET Call schema omits this field.
+        monkeypatch.setattr(client,'get_call',lambda _:original)
+        event=fixture_event()
+        async def close():pass
+        async def builder(call, scoped):
+            assert call is not original
+            assert call['expires_at']==event['expires_at']
+            assert {k:v for k,v in call.items() if k!='expires_at'}==original
+            built=await build_agent(Choice(close),call=call,relay=scoped)
+            async def voice_run(*a,**kw):return 'accepted-with-invitation-deadline'
+            built.agent.run=voice_run
+            return built
+        assert await run_prepared_incoming(client,event,builder)=='accepted-with-invitation-deadline'
+        assert 'expires_at' not in original
+        assert len(client.accepts)==1
+    asyncio.run(run())
+
+@pytest.mark.parametrize('expiry',[None,0])
+def test_missing_or_expired_invitation_never_reaches_preparation(expiry):
+    from unittest.mock import AsyncMock
+    async def run():
+        client=Client()
+        event=fixture_event()
+        if expiry is None:event.pop('expires_at')
+        else:event['expires_at']=expiry
+        build=AsyncMock()
+        assert await run_prepared_incoming(client,event,build) is None
+        build.assert_not_awaited()
+        assert not client.accepts
     asyncio.run(run())

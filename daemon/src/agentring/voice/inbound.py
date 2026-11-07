@@ -52,7 +52,8 @@ async def run_prepared_incoming(client: Any, event: dict[str, Any], build: Any, 
         if not is_incoming_call(event) or call.get("state") not in ("ringing", "active"):
             return None
         scoped = client.with_chat(call["chat_id"])
-        preparing = asyncio.create_task(build(call, scoped))
+        # GET Call omits expiry; only the authenticated invitation supplies it.
+        preparing = asyncio.create_task(build(dict(call, expires_at=event["expires_at"]), scoped))
         waiters = {preparing, *([stopped] if stopped else [])}
         done, _ = await asyncio.wait(waiters, timeout=max(0, event["expires_at"] / 1000 - time.time()),
                                      return_when=asyncio.FIRST_COMPLETED)
