@@ -20,6 +20,7 @@ object AppVisibility {
         get() = foreground.value
         set(value) { foreground.value = value }
     val requestedChat = mutableStateOf<String?>(null)
+    val imagePreviewOpen = mutableStateOf(false)
 }
 
 class MainActivity : ComponentActivity() {

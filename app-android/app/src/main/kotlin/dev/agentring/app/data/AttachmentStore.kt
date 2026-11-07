@@ -18,7 +18,7 @@ data class SelectedAttachment(val file: File, val name: String, val mediaType: S
     val size: Long get() = file.length()
 }
 
-/** Only user-selected downloads are stored. Every downloaded byte is checksum verified. */
+/** Visible image previews and user-selected downloads use private, checksum-verified files. */
 class AttachmentStore(private val context: Context) {
     private val downloads = File(context.filesDir, "attachments").apply { mkdirs() }
     private val drafts = File(context.cacheDir, "attachment-drafts").apply { mkdirs() }
@@ -86,12 +86,33 @@ class AttachmentStore(private val context: Context) {
         context.startActivity(intent)
     }
 
-    fun thumbnail(file: File): Bitmap? {
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(file.path, bounds)
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
-        var sample = 1
-        while (bounds.outWidth / sample > 512 || bounds.outHeight / sample > 512) sample *= 2
-        return BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inSampleSize = sample })
+    /** Bounds decoding before allocating pixels; ImageDecoder also applies image orientation. */
+    fun image(attachment: Attachment, file: File, maxDimension: Int): Bitmap {
+        require(maxDimension in 1..2048)
+        require(file.length() == attachment.sizeBytes) { "Cached image size changed. Retry the preview." }
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) { val count = input.read(buffer); if (count < 0) break; digest.update(buffer, 0, count) }
+        }
+        require(digest.digest().joinToString("") { "%02x".format(it) }.equals(attachment.sha256, true)) { "Cached image checksum changed. Retry the preview." }
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 28) {
+                return android.graphics.ImageDecoder.decodeBitmap(android.graphics.ImageDecoder.createSource(file)) { decoder, info, _ ->
+                    val scale = maxOf(info.size.width.toDouble() / maxDimension, info.size.height.toDouble() / maxDimension, 1.0)
+                    decoder.setTargetSize(maxOf(1, (info.size.width / scale).toInt()), maxOf(1, (info.size.height / scale).toInt()))
+                    decoder.allocator = android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE
+                }
+            }
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.path, bounds)
+            require(bounds.outWidth > 0 && bounds.outHeight > 0) { "This image format cannot be previewed" }
+            var sample = 1
+            while (bounds.outWidth / sample > maxDimension || bounds.outHeight / sample > maxDimension) sample *= 2
+            return BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inSampleSize = sample })
+                ?: error("This image format cannot be previewed")
+        } catch (e: OutOfMemoryError) { throw IllegalStateException("Not enough memory to preview this image. Save it to view elsewhere.", e) }
     }
+
+    fun discardCached(attachment: Attachment) { target(attachment).delete() }
 }

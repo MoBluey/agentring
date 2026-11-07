@@ -37,4 +37,15 @@ class QuestionProtocolTest {
         assertEquals("Claude Code", pending.copy(clientSessionId = "legacy-session").displayTitle("Claude Code"))
         assertEquals("OpenAI", pending.copy(caller = CallerContext(provider = "OpenAI")).displayTitle("Claude Code"))
     }
+    @Test fun `composer uses short verified targets and an honest unknown fallback`() {
+        val chat = Chat("chat_one", "session", "Session", createdAt = 1, updatedAt = 1)
+        assertEquals("Claude", chat.copy(callee = "claude").composerTarget())
+        assertEquals("Codex", chat.copy(callee = "codex").composerTarget())
+        assertEquals("Claude", chat.copy(caller = CallerContext(provider = "Claude Code")).composerTarget())
+        assertEquals("Codex", chat.copy(caller = CallerContext(provider = "OpenAI Codex")).composerTarget())
+        assertEquals("Codex", chat.copy(callee = null, caller = CallerContext(provider = "OpenAI / Codex")).composerTarget())
+        assertEquals("Codex", chat.copy(callee = null, caller = CallerContext(provider = "OpenAI/Codex")).composerTarget())
+        assertEquals("Other provider", chat.copy(caller = CallerContext(provider = "Other provider")).composerTarget())
+        assertEquals("this session", chat.composerTarget())
+    }
 }

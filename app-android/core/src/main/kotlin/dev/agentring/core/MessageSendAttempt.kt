@@ -16,4 +16,14 @@ class MessageSendAttempt {
     }
 
     fun reset() { payload = null; id = null }
+
+    fun snapshot(): List<String?> = listOf(payload?.first, payload?.second, id)
+
+    companion object {
+        fun restore(snapshot: List<String?>): MessageSendAttempt = MessageSendAttempt().apply {
+            require(snapshot.size == 3)
+            id = snapshot[2]
+            payload = if (id == null) null else snapshot[0].orEmpty() to snapshot[1]
+        }
+    }
 }

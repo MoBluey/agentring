@@ -346,3 +346,6 @@
 -keep,allowoptimization,includedescriptorclasses class dev.agentring.core.RelayApi { public *; protected *; }
 -keep,allowoptimization,includedescriptorclasses class dev.agentring.core.RelaySocket { public *; protected *; }
 -keep,includedescriptorclasses interface dev.agentring.core.RelaySocket$Listener { public *; }
+
+# Image workflow instrumentation reads exact attachment checksum/name metadata.
+-keep,allowoptimization,includedescriptorclasses class dev.agentring.core.Attachment { public *; protected *; }

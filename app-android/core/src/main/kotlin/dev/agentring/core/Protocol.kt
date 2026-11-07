@@ -91,6 +91,21 @@ data class Chat(
 ) {
     /** A pending new call has no verified caller yet; it must not inherit the legacy relay name. */
     fun displayTitle(legacyName: String): String = caller.title(if (clientSessionId.startsWith("pending:")) "" else legacyName)
+
+    /** Short composer wording only; call routing still uses the explicit relay session target. */
+    fun composerTarget(): String = when (callee) {
+        "claude" -> "Claude"
+        "codex" -> "Codex"
+        else -> when (val provider = caller.provider?.trim()?.takeIf { it.isNotEmpty() }) {
+            null -> "this session"
+            else -> when (provider.lowercase().replace(Regex("\\s*/\\s*"), "/")) {
+                "claude", "claude code", "anthropic" -> "Claude"
+                "codex", "openai codex", "openai/codex" -> "Codex"
+                else -> provider
+            }
+        }
+    }
+
 }
 
 @Serializable

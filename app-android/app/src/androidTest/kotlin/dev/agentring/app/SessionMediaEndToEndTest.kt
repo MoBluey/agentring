@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.printToString
+import androidx.compose.ui.test.isDisplayed
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -104,9 +105,9 @@ class SessionMediaEndToEndTest {
     }
 
     /** Runs a shell command as the shell user and waits for it to finish. */
-    private fun shell(cmd: String) {
+    private fun shell(cmd: String): String {
         val pfd = InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(cmd)
-        android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd).use { it.readBytes() }
+        return android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd).use { String(it.readBytes()) }
     }
 
     private fun screenshot(name: String) {
@@ -126,6 +127,10 @@ class SessionMediaEndToEndTest {
     }
 
     private fun openChat(chatId: String) {
+        if (!runCatching { compose.onNodeWithTag("chat_list").isDisplayed() }.getOrDefault(false)) {
+            val tag = if (compose.onAllNodes(hasTestTag("back_chats")).fetchSemanticsNodes().isNotEmpty()) "back_chats" else "open_sidebar"
+            compose.onNodeWithTag(tag).performClick()
+        }
         waitForTag("chat_$chatId")
         compose.onNodeWithTag("chat_$chatId").performClick()
     }
@@ -504,6 +509,144 @@ class SessionMediaEndToEndTest {
         verifyCallSelection()
     }
 
+    @Test
+    fun inlineImagesFullScreenAndResponsiveSessions() {
+        val firstId = args.getString("imageChatId") ?: error("imageChatId required")
+        val secondId = args.getString("otherChatId") ?: error("otherChatId required")
+        val imageId = args.getString("imageAttachmentId") ?: error("imageAttachmentId required")
+        val incomingMessageId = args.getString("imageMessageId") ?: error("imageMessageId required")
+        val incoming = agent("GET", "/v1/messages/$incomingMessageId")["attachments"]!!.jsonArray.single().jsonObject
+        val attachment = ProtocolJson.decodeFromString(Attachment.serializer(), incoming.toString())
+        assertEquals(args.getString("imageExpectedSha"), attachment.sha256)
+        val size = Regex("Override size: ([0-9]+x[0-9]+)").find(shell("wm size"))?.groupValues?.get(1) ?: "reset"
+        val density = Regex("Override density: ([0-9]+)").find(shell("wm density"))?.groupValues?.get(1) ?: "reset"
+        pairNormally()
+        assertEquals("Agentring", context.applicationInfo.loadLabel(context.packageManager).toString())
+        assertEquals("Agentring", context.packageManager.getActivityInfo(android.content.ComponentName(context, MainActivity::class.java), 0).loadLabel(context.packageManager).toString())
+        try {
+            compose.onNodeWithTag("tab_messages").performClick()
+            openChat(firstId)
+            waitForTag("preview_$imageId", timeoutMs = 30_000)
+            val cached = AttachmentStore(context).cached(attachment)!!
+            assertEquals(attachment.sha256, sha(cached.readBytes()))
+            val thumb = AttachmentStore(context).image(attachment, cached, 512)
+            assertTrue(thumb.width <= 512 && thumb.height <= 512)
+            thumb.recycle()
+            screenshot("inline-received-image")
+            compose.onNodeWithTag("preview_$imageId").performScrollTo().performClick()
+            waitForTag("full_image_$imageId")
+            val bounds = compose.onNodeWithTag("image_viewer").fetchSemanticsNode().boundsInRoot
+            val window = context.getSystemService(android.view.WindowManager::class.java).currentWindowMetrics.bounds
+            assertTrue("Full screen width", bounds.width >= window.width() - 2)
+            assertTrue("Full screen height", bounds.height >= window.height() - 2)
+            val full = AttachmentStore(context).image(attachment, cached, 2048)
+            assertTrue(full.width <= 2048 && full.height <= 2048)
+            full.recycle()
+            assertTrue(shell("dumpsys activity activities").lineSequence().any { (it.contains("topResumedActivity") || it.contains("mResumedActivity")) && it.contains("MainActivity") })
+            val hidden = agent("POST", "/v1/messages", """{"chat_id":"$firstId","text":"Arrived behind the full-screen image"}""")["msg_id"]!!.jsonPrimitive.content
+            waitFor(what = "stored message behind full-screen viewer") { agent("GET", "/v1/messages/$hidden")["delivered_at"] != null }
+            assertTrue(agent("GET", "/v1/messages/$hidden")["read_at"] == null)
+            screenshot("full-screen-received-image")
+            InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_BACK)
+            waitForTag("message_input")
+            waitFor(what = "read after returning from image") { agent("GET", "/v1/messages/$hidden")["read_at"] != null }
+            compose.onNodeWithTag("save_$imageId").performScrollTo().performClick()
+            nativeClick("Save", ignoreCase = true)
+            waitForTag("message_input")
+            val saved = shell("sha256sum /sdcard/Download/${attachment.name}").substringBefore(' ')
+            assertEquals(attachment.sha256, saved)
+
+            val stamp = System.currentTimeMillis().toString()
+            val bitmap = Bitmap.createBitmap(3000, 1500, Bitmap.Config.ARGB_8888).apply { eraseColor(android.graphics.Color.BLUE) }
+            val bytes = ByteArrayOutputStream().also { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+            bitmap.recycle()
+            val filename = "sent-inline-$stamp.png"
+            val uri = createDownload(filename, "image/png", bytes)
+            try {
+                compose.onNodeWithTag("attach_button").performClick()
+                pickDocument(filename)
+                waitForText(filename)
+                val firstDraft = "Claude draft $stamp"
+                val secondDraft = "Codex draft $stamp"
+                compose.onNodeWithTag("message_input").performTextInput(firstDraft)
+                compose.onNodeWithTag("back_chats").performClick()
+                waitForTag("sessions_sidebar")
+                assertTrue(dev.agentring.app.ui.AppVisibility.visibleChatId == null)
+                screenshot("sidebar-narrow-open")
+                openChat(secondId)
+                waitForText("Reply to Codex")
+                assertTrue(compose.onAllNodes(hasTestTag("message_input").and(hasText(firstDraft))).fetchSemanticsNodes().isEmpty())
+                compose.onNodeWithTag("message_input").performTextInput(secondDraft)
+                openChat(firstId)
+                waitForTag("message_input", firstDraft)
+                waitForText(filename)
+                compose.onNodeWithTag("back_chats").performClick()
+                compose.waitForIdle()
+                waitFor(what = "sidebar fully covers the selected conversation") { dev.agentring.app.ui.AppVisibility.visibleChatId == null }
+                val obscured = agent("POST", "/v1/messages", """{"chat_id":"$firstId","text":"Arrived behind the sessions sidebar"}""")["msg_id"]!!.jsonPrimitive.content
+                waitFor(what = "delivered behind sidebar") { agent("GET", "/v1/messages/$obscured")["delivered_at"] != null }
+                assertTrue(agent("GET", "/v1/messages/$obscured")["read_at"] == null)
+                compose.onNodeWithTag("close_sidebar").performClick(); compose.waitForIdle()
+                waitFor(what = "read after closing sidebar") { agent("GET", "/v1/messages/$obscured")["read_at"] != null }
+                shell("wm size 1500x1800"); shell("wm density 320")
+                waitForTag("message_input", firstDraft, timeoutMs = 30_000)
+                waitForText(filename)
+                waitForTag("sessions_sidebar")
+                val side = compose.onNodeWithTag("sessions_sidebar").fetchSemanticsNode().boundsInRoot
+                val pane = compose.onNodeWithTag("conversation_pane").fetchSemanticsNode().boundsInRoot
+                assertTrue("Sidebar beside the conversation", pane.left >= side.right - 2)
+                screenshot("sidebar-wide-open")
+                compose.onNodeWithTag("close_sidebar").performClick(); compose.waitForIdle()
+                assertTrue(!runCatching { compose.onNodeWithTag("sessions_sidebar").isDisplayed() }.getOrDefault(false))
+                waitForTag("message_input", firstDraft)
+                screenshot("sidebar-wide-collapsed")
+                openChat(secondId)
+                waitForTag("message_input", secondDraft)
+                openChat(firstId)
+                waitForTag("message_input", firstDraft)
+                waitForText(filename)
+                shell("wm size $size"); shell("wm density $density")
+                waitForTag("message_input", firstDraft, timeoutMs = 30_000)
+                waitForText(filename)
+                screenshot("sidebar-restored-narrow")
+                compose.onNodeWithTag("send_button").performClick()
+                var outgoing: JsonObject? = null
+                waitFor(what = "normal picker upload through restored chat draft") {
+                    outgoing = agent("GET", "/v1/messages?chat_id=$firstId&from=user")["messages"]!!.jsonArray.map { it.jsonObject }.lastOrNull { it["text"]!!.jsonPrimitive.content == firstDraft }
+                    outgoing != null
+                }
+                val sentAttachment = outgoing!!["attachments"]!!.jsonArray.single().jsonObject
+                val sentId = sentAttachment["attachment_id"]!!.jsonPrimitive.content
+                assertEquals(sha(bytes), sentAttachment["sha256"]!!.jsonPrimitive.content)
+                assertArrayEquals(bytes, agentBytes("/v1/attachments/$sentId/content"))
+                waitForTag("preview_$sentId", timeoutMs = 30_000)
+                compose.onNodeWithTag("preview_$sentId").performScrollTo().performClick()
+                waitForTag("full_image_$sentId")
+                screenshot("full-screen-sent-image")
+                compose.onNodeWithTag("close_image_viewer").performClick()
+                waitForTag("message_input")
+                waitForText("Reply to Claude")
+            } finally { context.contentResolver.delete(uri, null, null) }
+
+            val corrupt = agentUpload(firstId, "unsupported-$stamp.png", "image/png", "not-an-image".toByteArray())
+            val corruptId = corrupt["attachment_id"]!!.jsonPrimitive.content
+            agent("POST", "/v1/messages", """{"chat_id":"$firstId","text":"","attachment_ids":["$corruptId"]}""")
+            waitForTag("preview_error_$corruptId")
+            compose.onNodeWithTag("retry_preview_$corruptId").performScrollTo().performClick()
+            waitForTag("preview_error_$corruptId")
+            waitForTag("save_$corruptId")
+            screenshot("corrupt-image-fallback")
+            val pdf = agentUpload(firstId, "preview-regression-$stamp.pdf", "application/pdf", "%PDF-1.4\n%%EOF".toByteArray())
+            val pdfId = pdf["attachment_id"]!!.jsonPrimitive.content
+            agent("POST", "/v1/messages", """{"chat_id":"$firstId","text":"Document still uses explicit download","attachment_ids":["$pdfId"]}""")
+            waitForTag("download_$pdfId")
+            assertTrue(AttachmentStore(context).cached(ProtocolJson.decodeFromString(Attachment.serializer(), pdf.toString())) == null)
+            compose.onNodeWithTag("download_$pdfId").performScrollTo().performClick()
+            waitForTag("open_$pdfId")
+            assertArrayEquals("%PDF-1.4\n%%EOF".toByteArray(), AttachmentStore(context).cached(ProtocolJson.decodeFromString(Attachment.serializer(), pdf.toString()))!!.readBytes())
+        } finally { shell("wm size $size"); shell("wm density $density") }
+    }
+
     /** Real installed-provider acceptance; run against the isolated development serve daemon. */
     @Test
     fun realProviderSessionsRetainMemory() {
@@ -641,7 +784,7 @@ class SessionMediaEndToEndTest {
             compose.onNodeWithTag("tab_messages").performClick()
             openChat(chatId)
             waitForTag("message_input")
-            waitForText("Reply to OpenAI")
+            waitForText("Reply to Codex")
             waitForTag("call_session")
             screenshot("existing-session-call-button")
             compose.onNodeWithTag("call_session").performClick()
