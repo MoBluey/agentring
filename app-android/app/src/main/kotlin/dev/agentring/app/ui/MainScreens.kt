@@ -145,9 +145,9 @@ private fun HomeScreen(pairing: Pairing) {
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            AgentAvatar(pairing.agentName, online = agent)
+            AgentAvatar("AgentRing", online = agent, icon = painterResource(R.drawable.ic_launcher_foreground))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(pairing.agentName, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.testTag("agent_name"))
+                Text("AgentRing", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.testTag("agent_name"))
                 val (label, color) = when (agent) {
                     true -> stringResource(R.string.agent_online) to colors.ok
                     false -> stringResource(R.string.agent_offline) to colors.idle

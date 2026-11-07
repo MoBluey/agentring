@@ -163,9 +163,9 @@ fun BrandCard(
     }
 }
 
-/** Avatar circle with the agent's initial. */
+/** Avatar circle with the agent's initial or an explicit brand mark. */
 @Composable
-fun AgentAvatar(name: String, size: Dp = 56.dp, online: Boolean? = null) {
+fun AgentAvatar(name: String, size: Dp = 56.dp, online: Boolean? = null, icon: Painter? = null) {
     val scheme = MaterialTheme.colorScheme
     val status = LocalStatusColors.current
     Box {
@@ -175,11 +175,15 @@ fun AgentAvatar(name: String, size: Dp = 56.dp, online: Boolean? = null) {
                 .size(size)
                 .background(Brush.linearGradient(listOf(scheme.primary, scheme.primary.copy(alpha = 0.7f))), CircleShape),
         ) {
-            Text(
-                name.trim().take(1).uppercase().ifEmpty { "A" },
-                style = MaterialTheme.typography.headlineSmall,
-                color = scheme.onPrimary,
-            )
+            if (icon != null) {
+                Icon(icon, null, tint = Color.Unspecified, modifier = Modifier.size(size))
+            } else {
+                Text(
+                    name.trim().take(1).uppercase().ifEmpty { "A" },
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = scheme.onPrimary,
+                )
+            }
         }
         if (online != null) {
             Box(
