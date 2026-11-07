@@ -152,6 +152,8 @@ class CallSession:
         self.source = rtc.AudioSource(self.backend.output_rate, 1, queue_size_ms=200)
         self.inputs: dict[str, bytearray] = {}  # each participant's audio, waiting to be sent
         self.output = bytearray()  # model speech waiting to play
+        self._output_ready = asyncio.Event()
+        self._output_active = False
         self.answered = asyncio.Event()
         self.done = asyncio.Event()
         self.end_reason = ""
@@ -276,6 +278,19 @@ class CallSession:
     async def _play_loop(self) -> None:
         silence = b"\0" * self._frame
         while True:
+            if len(self.output) < self._frame and self._output_active:
+                # capture_frame backpressure is not an audio deadline. Speech
+                # already in the native queue can cover a late backend packet.
+                # Do not splice zeros into that speech before using its headroom.
+                self._output_ready.clear()
+                headroom = self.source.queued_duration - self._frame / (2 * self.backend.output_rate)
+                if headroom > 0:
+                    try:
+                        await asyncio.wait_for(self._output_ready.wait(), headroom)
+                    except TimeoutError:
+                        pass
+                    else:
+                        continue
             if len(self.output) >= self._frame:
                 frame = bytes(self.output[: self._frame])
                 del self.output[: self._frame]
@@ -308,8 +323,12 @@ class CallSession:
             self._tasks.append(asyncio.create_task(self._answer_tools(ev.calls)))
         elif isinstance(ev, AudioOut):
             self.output += ev.pcm
+            self._output_active = True
+            self._output_ready.set()
             self.last_agent_audio_at = time.time()
         elif isinstance(ev, Interrupted):
+            self._output_active = False
+            self._output_ready.set()
             self.output.clear()
             self.source.clear_queue()
         elif isinstance(ev, Transcript):
@@ -317,6 +336,8 @@ class CallSession:
             if ev.role == "user" and ev.text.strip():
                 self.last_user_speech_at = time.time()
         elif isinstance(ev, TurnComplete):
+            self._output_active = False
+            self._output_ready.set()
             for role in ("user", "agent"):
                 text = self.partial[role].strip()
                 if text:
